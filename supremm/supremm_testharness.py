@@ -4,11 +4,16 @@ from supremm.summarize import Summarize
 from supremm.plugin import loadplugins, loadpreprocessors
 from supremm.config import Config
 
+from pcp import pmapi
+import cpmapi as c_pmapi
+
 import json
 from getopt import getopt
 import sys
 import os
 import logging
+import datetime
+import math
 
 def usage():
     """ print usage """
@@ -46,6 +51,12 @@ class MockJob(object):
         self.acct = {"end_time": 12312, "id": 1, "uid": "sdf", "user": "werqw"}
         self.nodes = ["node" + str(i) for i in xrange(len(archivelist))]
         self._data = {}
+
+        context = pmapi.pmContext(c_pmapi.PM_CONTEXT_ARCHIVE, archivelist[0])
+        mdata = context.pmGetArchiveLabel()
+        self.start_datetime = datetime.datetime.utcfromtimestamp(math.floor(mdata.start))
+        self.end_datetime = datetime.datetime.utcfromtimestamp(math.ceil(context.pmGetArchiveEnd()))
+
 
     def get_errors(self):
         return []

@@ -3,6 +3,7 @@
 from supremm.summarize import Summarize
 from supremm.plugin import loadplugins, loadpreprocessors
 from supremm.config import Config
+from supremm.proc_common import filter_plugins
 
 from pcp import pmapi
 import cpmapi as c_pmapi
@@ -22,19 +23,29 @@ def usage():
 def getoptions():
     """ process comandline options """
 
-    opts, args = getopt(sys.argv[1:], "dqh",
-                     ["debug", 
-                      "quiet", 
-                      "help"])
+    opts, args = getopt(sys.argv[1:], "dqhi:e:",
+                     ["debug",
+                      "quiet",
+                      "help",
+                      "plugin-include",
+                      "plugin-exclude"])
 
-    retdata = {"log": logging.INFO}
+    retdata = {
+            "log": logging.INFO,
+            "plugin_whitelist": [],
+            "plugin_blacklist": []
+            }
 
-    for opt in opts:
-        if opt[0] in ("-d", "--debug"):
+    for opt, arg in opts:
+        if opt in ("-d", "--debug"):
             retdata['log'] = logging.DEBUG
-        if opt[0] in ("-q", "--quiet"):
+        if opt in ("-q", "--quiet"):
             retdata['log'] = logging.ERROR
-        if opt[0] in ("-h", "--help"):
+        if opt in ("-i", "--plugin-include"):
+            retdata['plugin_whitelist'].append(arg)
+        if opt in ("-e", "--plugin-exclude"):
+            retdata['plugin_blacklist'].append(arg)
+        if opt in ("-h", "--help"):
             usage()
             sys.exit(0)
 
@@ -52,10 +63,16 @@ class MockJob(object):
         self.nodes = ["node" + str(i) for i in xrange(len(archivelist))]
         self._data = {}
 
-        context = pmapi.pmContext(c_pmapi.PM_CONTEXT_ARCHIVE, archivelist[0])
-        mdata = context.pmGetArchiveLabel()
-        self.start_datetime = datetime.datetime.utcfromtimestamp(math.floor(mdata.start))
-        self.end_datetime = datetime.datetime.utcfromtimestamp(math.ceil(context.pmGetArchiveEnd()))
+        archive_starts = []
+        archive_ends = []
+        for archive in archivelist:
+            context = pmapi.pmContext(c_pmapi.PM_CONTEXT_ARCHIVE, archive)
+            mdata = context.pmGetArchiveLabel()
+            archive_starts.append(datetime.datetime.utcfromtimestamp(math.floor(mdata.start)))
+            archive_ends.append(datetime.datetime.utcfromtimestamp(math.ceil(context.pmGetArchiveEnd())))
+
+        self.start_datetime = min(archive_starts)
+        self.end_datetime = max(archive_ends)
 
 
     def get_errors(self):
@@ -101,6 +118,7 @@ def main():
     logging.debug("Loaded %s preprocessors", len(preprocs))
 
     plugins = loadplugins()
+    _, plugins = filter_plugins({"plugin_whitelist": opts['plugin_whitelist']}, [], plugins)
     logging.debug("Loaded %s plugins", len(plugins))
 
     archivelist = args

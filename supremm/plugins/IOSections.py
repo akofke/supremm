@@ -7,6 +7,7 @@ import numpy
 
 from supremm.plugin import Plugin
 from supremm.errors import ProcessingError
+from supremm.statistics import calculate_stats
 
 
 class IOSections(Plugin):
@@ -59,6 +60,7 @@ class IOSections(Plugin):
 
     def results(self):
 
+        # Calculate results for final section
         for node, data in self.nodes.iteritems():
             avg_read = (data["last_value"][0] - data["section_start_data"][0]) / (self.endtime - data["section_start_timestamp"])
             avg_write = (data["last_value"][1] - data["section_start_data"][1]) / (self.endtime - data["section_start_timestamp"])
@@ -71,10 +73,19 @@ class IOSections(Plugin):
             data = {k: v for k, v in data.iteritems() if k == "quarter_avgs"}
             self.nodes[node] = data
 
-        return self.nodes
-    # {
-    #             "1": self.quarter_avgs[0],
-    #             "2": self.quarter_avgs[1],
-    #             "3": self.quarter_avgs[2],
-    #             "4": self.quarter_avgs[3]
-    #             }
+        section_stats_read = []
+        section_stats_write = []
+        for i in range(4):
+            section_stats_read.append(calculate_stats([d["quarter_avgs"][i][0] for n, d in self.nodes.iteritems()]))
+            section_stats_write.append(calculate_stats([d["quarter_avgs"][i][1] for n, d in self.nodes.iteritems()]))
+
+        middle_avg_read = (section_stats_read[1]["avg"] + section_stats_read[2]["avg"]) / 2
+        middle_avg_write = (section_stats_write[1]["avg"] + section_stats_write[2]["avg"]) / 2
+        results = {
+                    "section_stats_read": section_stats_read,
+                    "section_stats_write": section_stats_write,
+                    "start/middle_read": section_stats_read[1]["avg"] / middle_avg_read,
+                    "start/middle_write": section_stats_write[1]["avg"] / middle_avg_write
+                }
+
+        return results

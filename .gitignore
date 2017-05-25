@@ -1,1 +1,10 @@
 build/
+*.pyc
+
+# vim swap files
+*.swp
+
+# generate c source files
+supremm/pypmlogextract/*.c
+
+supremm/bin/

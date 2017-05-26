@@ -8,3 +8,6 @@ build/
 supremm/pypmlogextract/*.c
 
 supremm/bin/
+
+.idea/
+.python-version

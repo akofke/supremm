@@ -94,9 +94,9 @@ class IOSections(Plugin):
             "section_stats_write": section_stats_write,
             "start/middle_read": ratio(section_stats_read[0]["avg"], middle_avg_read),
             "start/middle_write": ratio(section_stats_write[0]["avg"], middle_avg_write),
-            "middle/end_read": ratio(middle_avg_read, section_stats_read)[3]["avg"],
-            "middle/end_write": ratio(middle_avg_write, section_stats_write)[3]["avg"],
-            "start/end_read": ratio(section_stats_read[0]["avg"], section_stats_read)[3]["avg"],
+            "middle/end_read": ratio(middle_avg_read, section_stats_read[3]["avg"]),
+            "middle/end_write": ratio(middle_avg_write, section_stats_write[3]["avg"]),
+            "start/end_read": ratio(section_stats_read[0]["avg"], section_stats_read[3]["avg"]),
             "start/end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"])
         }
 

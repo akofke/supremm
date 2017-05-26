@@ -2,7 +2,6 @@
 from __future__ import print_function
 
 import datetime
-import time
 import numpy
 
 from supremm.plugin import Plugin
@@ -89,17 +88,33 @@ class IOSections(Plugin):
 
         middle_avg_read = (section_stats_read[1]["avg"] + section_stats_read[2]["avg"]) / 2
         middle_avg_write = (section_stats_write[1]["avg"] + section_stats_write[2]["avg"]) / 2
-        # TODO: address divide by 0 (np.divide?)
         results = {
             "nodes_used": nodes_used,
             "section_stats_read": section_stats_read,
             "section_stats_write": section_stats_write,
-            "start/middle_read": section_stats_read[0]["avg"] / middle_avg_read,
-            "start/middle_write": section_stats_write[0]["avg"] / middle_avg_write,
-            "middle/end_read": middle_avg_read / section_stats_read[3]["avg"],
-            "middle/end_write": middle_avg_write / section_stats_write[3]["avg"],
-            "start/end_read": section_stats_read[0]["avg"] / section_stats_read[3]["avg"],
-            "start/end_write": section_stats_write[0]["avg"] / section_stats_write[3]["avg"]
+            "start/middle_read": ratio(section_stats_read[0]["avg"], middle_avg_read),
+            "start/middle_write": ratio(section_stats_write[0]["avg"], middle_avg_write),
+            "middle/end_read": ratio(middle_avg_read, section_stats_read)[3]["avg"],
+            "middle/end_write": ratio(middle_avg_write, section_stats_write)[3]["avg"],
+            "start/end_read": ratio(section_stats_read[0]["avg"], section_stats_read)[3]["avg"],
+            "start/end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"])
         }
 
         return results
+
+
+def ratio(f1, f2):
+    """
+    Computes a ratio between two numbers, handling special cases appropriately for
+    this results format.
+    :param f1: the numerator
+    :param f2: the denominator
+    :return: the ratio between the numbers, an 'inf' float value if the denominator is 0, or 1.0 if both
+    numbers are 0.
+    """
+    if f1 == f2 == 0:
+        return 1.0
+    elif f2 == 0:
+        return float('inf')
+    else:
+        return f1 / f2

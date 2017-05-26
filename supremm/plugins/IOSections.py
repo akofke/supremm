@@ -11,7 +11,6 @@ from supremm.statistics import calculate_stats
 
 
 class IOSections(Plugin):
-
     name = property(lambda x: "iosections")
     mode = property(lambda x: "all")
     requiredMetrics = property(lambda x: ["gpfs.fsios.read_bytes", "gpfs.fsios.write_bytes"])
@@ -27,17 +26,16 @@ class IOSections(Plugin):
 
         self.nodes = {}
 
-
     def process(self, nodemeta, timestamp, data, description):
         n = nodemeta.nodename
         if n not in self.nodes:
             self.nodes[n] = {
-                        "current_marker": self.starttime + self.quarter,
-                        "section_start_data": None,
-                        "section_start_timestamp": self.starttime,
-                        "quarter_avgs": [],
-                        "last_value": []
-                    }
+                "current_marker": self.starttime + self.quarter,
+                "section_start_data": None,
+                "section_start_timestamp": self.starttime,
+                "quarter_avgs": [],
+                "last_value": []
+            }
 
         node_data = self.nodes[n]
 
@@ -45,7 +43,6 @@ class IOSections(Plugin):
         node_data["last_value"] = mountpoint_sums
         if node_data["section_start_data"] is None:
             node_data["section_start_data"] = mountpoint_sums
-
 
         if timestamp >= node_data["current_marker"]:
             avg_read = (mountpoint_sums[0] - node_data["section_start_data"][0]) / (timestamp - node_data["section_start_timestamp"])
@@ -59,6 +56,10 @@ class IOSections(Plugin):
         return True
 
     def results(self):
+        nodes_used = 0
+
+        # holds the averages for each node, grouped by quarter
+        section_data = [[] for _ in range(4)]
 
         # Calculate results for final section
         for node, data in self.nodes.iteritems():
@@ -67,25 +68,38 @@ class IOSections(Plugin):
 
             data["quarter_avgs"].append((avg_read, avg_write))
 
-            if len(data["quarter_avgs"]) != 4:
-                return {"error": ProcessingError.INSUFFICIENT_DATA}
+            if len(data["quarter_avgs"]) == 4:
+                # Only includes the nodes which have enough data to be meaningful.
+                for i in range(4):
+                    section_data[i].append(data["quarter_avgs"][i])
 
-            data = {k: v for k, v in data.iteritems() if k == "quarter_avgs"}
-            self.nodes[node] = data
+                nodes_used += 1
+
+        if nodes_used == 0:
+            # If there are no nodes left after removing all that don't have enough data, then
+            # there isn't enough data to report anything meaningful for the whole job
+            return {"error": ProcessingError.INSUFFICIENT_DATA}
 
         section_stats_read = []
         section_stats_write = []
-        for i in range(4):
-            section_stats_read.append(calculate_stats([d["quarter_avgs"][i][0] for n, d in self.nodes.iteritems()]))
-            section_stats_write.append(calculate_stats([d["quarter_avgs"][i][1] for n, d in self.nodes.iteritems()]))
+        for section in section_data:
+            section_rw = zip(*section)
+            section_stats_read.append(calculate_stats(section_rw[0]))
+            section_stats_write.append(calculate_stats(section_rw[1]))
 
         middle_avg_read = (section_stats_read[1]["avg"] + section_stats_read[2]["avg"]) / 2
         middle_avg_write = (section_stats_write[1]["avg"] + section_stats_write[2]["avg"]) / 2
+        # TODO: address divide by 0 (np.divide?)
         results = {
-                    "section_stats_read": section_stats_read,
-                    "section_stats_write": section_stats_write,
-                    "start/middle_read": section_stats_read[1]["avg"] / middle_avg_read,
-                    "start/middle_write": section_stats_write[1]["avg"] / middle_avg_write
-                }
+            "nodes_used": nodes_used,
+            "section_stats_read": section_stats_read,
+            "section_stats_write": section_stats_write,
+            "start/middle_read": section_stats_read[0]["avg"] / middle_avg_read,
+            "start/middle_write": section_stats_write[0]["avg"] / middle_avg_write,
+            "middle/end_read": middle_avg_read / section_stats_read[3]["avg"],
+            "middle/end_write": middle_avg_write / section_stats_write[3]["avg"],
+            "start/end_read": section_stats_read[0]["avg"] / section_stats_read[3]["avg"],
+            "start/end_write": section_stats_write[0]["avg"] / section_stats_write[3]["avg"]
+        }
 
         return results

@@ -10,6 +10,13 @@ from supremm.statistics import calculate_stats
 
 
 class IOSections(Plugin):
+    """
+    Plugin that computes and compares gpfs IO statistics for each
+    section of a job.
+    """
+
+    sections = 4
+
     name = property(lambda x: "iosections")
     mode = property(lambda x: "all")
     requiredMetrics = property(lambda x: ["gpfs.fsios.read_bytes", "gpfs.fsios.write_bytes"])
@@ -21,19 +28,22 @@ class IOSections(Plugin):
         super(IOSections, self).__init__(job)
         self.starttime = (job.start_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
         self.endtime = (job.end_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
-        self.quarter = (self.endtime - self.starttime) / 4
+        self.section = (self.endtime - self.starttime) / self.sections
 
         self.nodes = {}
+        self.section_start_timestamps = [[] for _ in range(self.sections)]
 
     def process(self, nodemeta, timestamp, data, description):
         n = nodemeta.nodename
         if n not in self.nodes:
+            self.section_start_timestamps[0].append(self.starttime)
             self.nodes[n] = {
-                "current_marker": self.starttime + self.quarter,
+                "current_marker": self.starttime + self.section,
                 "section_start_data": None,
                 "section_start_timestamp": self.starttime,
-                "quarter_avgs": [],
-                "last_value": []
+                "section_avgs": [],
+                "last_value": [],
+                "section_counter": 0
             }
 
         node_data = self.nodes[n]
@@ -47,30 +57,32 @@ class IOSections(Plugin):
             avg_read = (mountpoint_sums[0] - node_data["section_start_data"][0]) / (timestamp - node_data["section_start_timestamp"])
             avg_write = (mountpoint_sums[1] - node_data["section_start_data"][1]) / (timestamp - node_data["section_start_timestamp"])
 
-            node_data["quarter_avgs"].append((avg_read, avg_write))
-            node_data["current_marker"] += self.quarter
+            node_data["section_avgs"].append((avg_read, avg_write))
+            node_data["current_marker"] += self.section
             node_data["section_start_data"] = mountpoint_sums
             node_data["section_start_timestamp"] = timestamp
+            node_data["section_counter"] += 1
+            self.section_start_timestamps[node_data["section_counter"]].append(timestamp)
 
         return True
 
     def results(self):
         nodes_used = 0
 
-        # holds the averages for each node, grouped by quarter
-        section_data = [[] for _ in range(4)]
+        # holds the averages for each node, grouped by section
+        section_data = [[] for _ in range(self.sections)]
 
         # Calculate results for final section
         for node, data in self.nodes.iteritems():
             avg_read = (data["last_value"][0] - data["section_start_data"][0]) / (self.endtime - data["section_start_timestamp"])
             avg_write = (data["last_value"][1] - data["section_start_data"][1]) / (self.endtime - data["section_start_timestamp"])
 
-            data["quarter_avgs"].append((avg_read, avg_write))
+            data["section_avgs"].append((avg_read, avg_write))
 
-            if len(data["quarter_avgs"]) == 4:
+            if len(data["section_avgs"]) == self.sections:
                 # Only includes the nodes which have enough data to be meaningful.
-                for i in range(4):
-                    section_data[i].append(data["quarter_avgs"][i])
+                for i in range(self.sections):
+                    section_data[i].append(data["section_avgs"][i])
 
                 nodes_used += 1
 
@@ -81,13 +93,17 @@ class IOSections(Plugin):
 
         section_stats_read = []
         section_stats_write = []
+        section_start_timestamps = []
         for section in section_data:
             section_rw = zip(*section)
             section_stats_read.append(calculate_stats(section_rw[0]))
             section_stats_write.append(calculate_stats(section_rw[1]))
 
-        middle_avg_read = (section_stats_read[1]["avg"] + section_stats_read[2]["avg"]) / 2
-        middle_avg_write = (section_stats_write[1]["avg"] + section_stats_write[2]["avg"]) / 2
+        # Compute the combined average for the whole "middle" section, which is
+        # all sections except the first and last.
+        middle_avg_read = sum(sect["avg"] for sect in section_stats_read[1:-1]) / (self.sections - 2)
+        middle_avg_write = sum(sect["avg"] for sect in section_stats_write[1:-1]) / (self.sections -2)
+
         results = {
             "nodes_used": nodes_used,
             "section_stats_read": section_stats_read,
@@ -97,7 +113,8 @@ class IOSections(Plugin):
             "middle/end_read": ratio(middle_avg_read, section_stats_read[3]["avg"]),
             "middle/end_write": ratio(middle_avg_write, section_stats_write[3]["avg"]),
             "start/end_read": ratio(section_stats_read[0]["avg"], section_stats_read[3]["avg"]),
-            "start/end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"])
+            "start/end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"]),
+            "section_start_timestamps": [calculate_stats(sect) for sect in self.section_start_timestamps]
         }
 
         return results

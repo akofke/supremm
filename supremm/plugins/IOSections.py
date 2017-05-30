@@ -15,7 +15,9 @@ class IOSections(Plugin):
     section of a job.
     """
 
-    sections = 4
+    SECTIONS = 4
+    DISTANCE_THRESHOLD = 60
+    MIN_NODES = 1
 
     name = property(lambda x: "iosections")
     mode = property(lambda x: "all")
@@ -28,10 +30,10 @@ class IOSections(Plugin):
         super(IOSections, self).__init__(job)
         self.starttime = (job.start_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
         self.endtime = (job.end_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
-        self.section = (self.endtime - self.starttime) / self.sections
+        self.section = (self.endtime - self.starttime) / self.SECTIONS
 
         self.nodes = {}
-        self.section_start_timestamps = [[] for _ in range(self.sections)]
+        self.section_start_timestamps = [[] for _ in xrange(self.SECTIONS)]
 
     def process(self, nodemeta, timestamp, data, description):
         n = nodemeta.nodename
@@ -43,7 +45,8 @@ class IOSections(Plugin):
                 "section_start_timestamp": self.starttime,
                 "section_avgs": [],
                 "last_value": [],
-                "section_counter": 0
+                "section_counter": 0,
+                "data_error": False
             }
 
         node_data = self.nodes[n]
@@ -53,7 +56,10 @@ class IOSections(Plugin):
         if node_data["section_start_data"] is None:
             node_data["section_start_data"] = mountpoint_sums
 
-        if timestamp >= node_data["current_marker"]:
+        if timestamp >= node_data["current_marker"] and timestamp < self.endtime:
+            if timestamp - node_data["current_marker"] > self.DISTANCE_THRESHOLD:
+                node_data["data_error"] = True
+
             avg_read = (mountpoint_sums[0] - node_data["section_start_data"][0]) / (timestamp - node_data["section_start_timestamp"])
             avg_write = (mountpoint_sums[1] - node_data["section_start_data"][1]) / (timestamp - node_data["section_start_timestamp"])
 
@@ -70,7 +76,7 @@ class IOSections(Plugin):
         nodes_used = 0
 
         # holds the averages for each node, grouped by section
-        section_data = [[] for _ in range(self.sections)]
+        section_data = [[] for _ in xrange(self.SECTIONS)]
 
         # Calculate results for final section
         for node, data in self.nodes.iteritems():
@@ -79,21 +85,20 @@ class IOSections(Plugin):
 
             data["section_avgs"].append((avg_read, avg_write))
 
-            if len(data["section_avgs"]) == self.sections:
+            if len(data["section_avgs"]) == self.SECTIONS and not data["data_error"]:
                 # Only includes the nodes which have enough data to be meaningful.
-                for i in range(self.sections):
+                for i in xrange(self.SECTIONS):
                     section_data[i].append(data["section_avgs"][i])
 
                 nodes_used += 1
 
-        if nodes_used == 0:
+        if nodes_used < self.MIN_NODES:
             # If there are no nodes left after removing all that don't have enough data, then
             # there isn't enough data to report anything meaningful for the whole job
             return {"error": ProcessingError.INSUFFICIENT_DATA}
 
         section_stats_read = []
         section_stats_write = []
-        section_start_timestamps = []
         for section in section_data:
             section_rw = zip(*section)
             section_stats_read.append(calculate_stats(section_rw[0]))
@@ -101,8 +106,8 @@ class IOSections(Plugin):
 
         # Compute the combined average for the whole "middle" section, which is
         # all sections except the first and last.
-        middle_avg_read = sum(sect["avg"] for sect in section_stats_read[1:-1]) / (self.sections - 2)
-        middle_avg_write = sum(sect["avg"] for sect in section_stats_write[1:-1]) / (self.sections -2)
+        middle_avg_read = sum(sect["avg"] for sect in section_stats_read[1:-1]) / (self.SECTIONS - 2)
+        middle_avg_write = sum(sect["avg"] for sect in section_stats_write[1:-1]) / (self.SECTIONS - 2)
 
         results = {
             "nodes_used": nodes_used,

@@ -108,13 +108,13 @@ class IOSections(Plugin):
             "nodes_used": nodes_used,
             "section_stats_read": section_stats_read,
             "section_stats_write": section_stats_write,
-            "start/middle_read": ratio(section_stats_read[0]["avg"], middle_avg_read),
-            "start/middle_write": ratio(section_stats_write[0]["avg"], middle_avg_write),
-            "middle/end_read": ratio(middle_avg_read, section_stats_read[3]["avg"]),
-            "middle/end_write": ratio(middle_avg_write, section_stats_write[3]["avg"]),
-            "start/end_read": ratio(section_stats_read[0]["avg"], section_stats_read[3]["avg"]),
-            "start/end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"]),
-            "section_start_timestamps": [calculate_stats(sect) for sect in self.section_start_timestamps]
+            "section_start_timestamps": [calculate_stats(sect) for sect in self.section_start_timestamps],
+            "ratio_start_middle_read": ratio(section_stats_read[0]["avg"], middle_avg_read),
+            "ratio_start_middle_write": ratio(section_stats_write[0]["avg"], middle_avg_write),
+            "ratio_middle_end_read": ratio(middle_avg_read, section_stats_read[3]["avg"]),
+            "ratio_middle_end_write": ratio(middle_avg_write, section_stats_write[3]["avg"]),
+            "ratio_start_end_read": ratio(section_stats_read[0]["avg"], section_stats_read[3]["avg"]),
+            "ratio_start_end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"]),
         }
 
         return results

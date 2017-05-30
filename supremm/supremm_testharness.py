@@ -115,10 +115,14 @@ def main():
         logging.captureWarnings(True)
 
     preprocs = loadpreprocessors()
-    logging.debug("Loaded %s preprocessors", len(preprocs))
-
     plugins = loadplugins()
-    _, plugins = filter_plugins({"plugin_whitelist": opts['plugin_whitelist']}, [], plugins)
+
+    if len(opts['plugin_whitelist']) > 0:
+        preprocs, plugins = filter_plugins({"plugin_whitelist": opts['plugin_whitelist']}, preprocs, plugins)
+    elif len(opts['plugin_blacklist']) > 0:
+        preprocs, plugins = filter_plugins({"plugin_blacklist": opts['plugin_blacklist']}, preprocs, plugins)
+
+    logging.debug("Loaded %s preprocessors", len(preprocs))
     logging.debug("Loaded %s plugins", len(plugins))
 
     archivelist = args

@@ -11,3 +11,5 @@ supremm/bin/
 
 .idea/
 .python-version
+*.egg-info
+*.so

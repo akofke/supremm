@@ -1,8 +1,23 @@
 #!/usr/bin/env python
 from __future__ import print_function
 
+import csv
 import datetime
-import numpy
+
+import matplotlib.pyplot as plt
+import numpy as np
+import logging
+
+import jsonpickle
+import jsonpickle.ext.numpy
+import sys
+
+from autoperiod.plotting import Plotter
+
+jsonpickle.ext.numpy.register_handlers()
+
+from autoperiod import Autoperiod
+from autoperiod.helpers import convert_to_rates, interpolate_times
 
 from supremm.plugin import Plugin
 from supremm.errors import ProcessingError
@@ -14,6 +29,7 @@ class IOSections(Plugin):
     Plugin that computes and compares gpfs IO statistics for each
     section of a job.
     """
+
 
     SECTIONS = 4
     DISTANCE_THRESHOLD = 60
@@ -28,6 +44,7 @@ class IOSections(Plugin):
 
     def __init__(self, job):
         super(IOSections, self).__init__(job)
+        self.log = logging.getLogger("IOSections")
         self.starttime = (job.start_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
         self.endtime = (job.end_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
         self.section = (self.endtime - self.starttime) / self.SECTIONS
@@ -46,12 +63,23 @@ class IOSections(Plugin):
                 "section_avgs": [],
                 "last_value": [],
                 "section_counter": 0,
-                "data_error": False
+                "data_error": False,
+
+                #TODO: temp
+                "times": [timestamp],
+                "reads": [np.sum(data[0])],
+                "writes": [np.sum(data[1])]
             }
 
         node_data = self.nodes[n]
 
-        mountpoint_sums = [numpy.sum(x) for x in data]
+        #TODO: temp
+        node_data['times'].append(timestamp)
+        node_data['reads'].append(np.sum(data[0]))
+        node_data['writes'].append(np.sum(data[1]))
+
+
+        mountpoint_sums = [np.sum(x) for x in data]
         node_data["last_value"] = mountpoint_sums
         if node_data["section_start_data"] is None:
             node_data["section_start_data"] = mountpoint_sums
@@ -78,7 +106,26 @@ class IOSections(Plugin):
         # holds the averages for each node, grouped by section
         section_data = [[] for _ in xrange(self.SECTIONS)]
 
+        times_interp = None
+        summed_values_r = None
+        summed_values_w = None
+        for node, data in self.nodes.iteritems():
+            if times_interp is None:
+                times_interp = np.linspace(np.min(data['times']), np.max(data['times']), len(data['times']))
+                summed_values_r = np.interp(times_interp, data['times'], data['reads'])
+                summed_values_w = np.interp(times_interp, data['times'], data['writes'])
+            else:
+                summed_values_r += np.interp(times_interp, data['times'], data['reads'])
+                summed_values_w += np.interp(times_interp, data['times'], data['writes'])
+
+
+
+
+
+
+
         # Calculate results for final section
+        node_periods = {}
         for node, data in self.nodes.iteritems():
             avg_read = (data["last_value"][0] - data["section_start_data"][0]) / (self.endtime - data["section_start_timestamp"])
             avg_write = (data["last_value"][1] - data["section_start_data"][1]) / (self.endtime - data["section_start_timestamp"])
@@ -91,6 +138,42 @@ class IOSections(Plugin):
                     section_data[i].append(data["section_avgs"][i])
 
                 nodes_used += 1
+
+            # times = np.array(data["times"])
+            # reads = np.array(data["reads"])
+            # writes = np.array(data["writes"])
+            #
+            # _, reads = convert_to_rates(times, reads)
+            # times, writes = convert_to_rates(times, writes)
+            #
+            # _, reads = interpolate_times(times, reads)
+            # times, writes = interpolate_times(times, writes)
+            #
+            # ap_read = Autoperiod(times, reads, threshold_method='stat')
+            # ap_write = Autoperiod(times, writes, threshold_method='stat')
+            #
+            # ap_read_json = jsonpickle.dumps(ap_read)
+            # ap_write_json = jsonpickle.dumps(ap_write)
+            #
+            # logging.debug(len(ap_read_json))
+            # logging.debug(len(ap_write_json))
+            #
+            # node_periods[node] = {
+            #     'read': ap_read_json,
+            #     'write': ap_write_json
+            # }
+
+        self.log.info("Reads data size %s bytes for job %s", summed_values_r.nbytes, self._job.jobdir)
+        self.log.info("Writes data size %s bytes for job %s", summed_values_w.nbytes, self._job.jobdir)
+        ap_read = Autoperiod(*convert_to_rates(times_interp, summed_values_r), threshold_method='stat', plotter=Plotter()) if not np.allclose(summed_values_r, 0) else None
+        ap_write = Autoperiod(*convert_to_rates(times_interp, summed_values_w), threshold_method='stat', plotter=Plotter()) if not np.allclose(summed_values_r, 0) else None
+        plt.show()
+
+
+        node_periods['sum'] = {
+            'read': jsonpickle.dumps(ap_read),
+            'write': jsonpickle.dumps(ap_write)
+        }
 
         if nodes_used < self.MIN_NODES:
             # If there are no nodes left after removing all that don't have enough data, then
@@ -110,6 +193,7 @@ class IOSections(Plugin):
         middle_avg_write = sum(sect["avg"] for sect in section_stats_write[1:-1]) / (self.SECTIONS - 2)
 
         results = {
+            "_version": 1,
             "nodes_used": nodes_used,
             "section_stats_read": section_stats_read,
             "section_stats_write": section_stats_write,
@@ -120,6 +204,7 @@ class IOSections(Plugin):
             "ratio_middle_end_write": ratio(middle_avg_write, section_stats_write[3]["avg"]),
             "ratio_start_end_read": ratio(section_stats_read[0]["avg"], section_stats_read[3]["avg"]),
             "ratio_start_end_write": ratio(section_stats_write[0]["avg"], section_stats_write[3]["avg"]),
+            "node_periods": node_periods
         }
 
         return results

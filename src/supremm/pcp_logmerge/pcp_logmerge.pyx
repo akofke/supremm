@@ -37,15 +37,34 @@ cdef class Pool:
 
 cdef class MergedArchives:
     cdef tuple archives
+    cdef int start_archive
 
-    def __cinit__(self, list archives):
+    def __cinit__(self, list archives, int start_archive):
         self.archives = (ArchiveFetchGroup(path) for path in archives)
+        self.start_archive = start_archive
 
 
     cpdef add_metrics_required(self, list metrics):
-        pass
+        """
+        Attempts to add the given list of metrics as a whole to the archive fetchgroups.
+        Returns true if every metric was successfully added to at least one archive fetchgroup
+        (i.e. that archive contains metadata for the metric). 
+        """
+        # TODO: possibly keep a set of known failed metrics in case of duplicates across plugins, avoiding pmapi calls
 
+        # for each metric, success flag for each archive
+        cdef np.ndarray metric_success = np.full((len(metrics), len(self.archives)), False)
+        cdef int err
 
+        cdef Py_ssize_t i_arch
+        cdef Py_ssize_t i_met
+        for i_arch, arch_fg in enumerate(self.archives):
+            for i_met, metric in enumerate(metrics):
+                err = arch_fg.add_metric(metric)
+                if err != 0:
+                    metric_success[i_met, i_arch] = True
+
+        return np.all(np.any(metric_success, axis=1))
 
 cdef class ArchiveFetchGroup:
     cdef int creation_status
@@ -261,85 +280,31 @@ cdef _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
         view[i] = <object>values[i].cp
 
 
-def get_stuff():
-    cdef char *archive = "/user/adkofke/pcplogs/20161230.00.10"
-    cdef char *metric = "kernel.all.load"
-    cdef cpcp.pmFG fg
-
-    cdef int sts = cpcp.pmCreateFetchGroup(&fg, c_pmapi.PM_CONTEXT_ARCHIVE, archive)
-    print "Creating fg: {}".format(cpcp.pmErrStr(sts))
-
-    cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(fg))
-
-    cdef cpcp.pmLogLabel log_label
-    cpcp.pmGetArchiveLabel(&log_label)
-
-    cdef cpcp.timeval start
-    cpcp.pmtimevalFromReal(1, &start)
-    cpcp.pmSetMode(c_pmapi.PM_MODE_FORW, &start, 0)
-
-    cdef cpcp.timeval tv
-    cpcp.pmExtendFetchGroup_timestamp(fg, &tv)
-
-
-    cdef int out_inst_codes[5]
-    cdef char* out_inst_names[5]
-    cdef cpcp.pmAtomValue out_values[5]
-    cdef int out_statuses[5]
-    cdef unsigned int out_num
-    cdef int out_status
-    cdef int sts1 = cpcp.pmExtendFetchGroup_indom(
-        fg,
-        metric,
-        NULL,
-        out_inst_codes,
-        out_inst_names,
-        out_values,
-        c_pmapi.PM_TYPE_DOUBLE,
-        out_statuses,
-        5,
-        &out_num,
-        &out_status
-    )
-
-    print "Extend fg indom: {}".format(cpcp.pmErrStr(sts1))
-
-    cdef int sts2
-    cdef double ts
-    # while True:
-    #     sts2 = cpcp.pmFetchGroup(fg)
-    #     print "Fetch group: {}".format(cpcp.pmErrStr(sts2))
-    #     if sts2 == c_pmapi.PM_ERR_EOL:
-    #         break
-    #
-    #     ts = cpcp.pmtimevalToReal(&tv)
-    #     print "Timestamp: {}".format(ts)
-    #     for i in xrange(out_num):
-    #         print "{} status {}, value {}".format(
-    #             out_inst_names[i] if out_inst_names[i] is not NULL else "Only instance",
-    #             cpcp.pmErrStr(out_statuses[i]),
-    #             out_values[i]
-    #         )
-    #
-    #     print "===="
-
-
 def get_stuff2():
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/dev/shm/supremm-adkofke/mae/972366/cpn-p26-07")
     cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/job-972366-begin-20161229.23.06.00")
     fg.set_start(1)
-    # cdef int s1 = fg.add_metric("hinv.map.cpu_node")
-    # print cpcp.pmErrStr(s1)
-    #
-    # cdef int s2 = fg.add_metric("kernel.all.uptime")
-    # print cpcp.pmErrStr(s2)
+    cdef int s1 = fg.add_metric("hotproc.io.write_bytes")
+    print cpcp.pmErrStr(s1)
+
+    s1 = fg.add_metric("hinv.map.cpu_node")
+    print cpcp.pmErrStr(s1)
+
+    cdef int s2 = fg.add_metric("kernel.all.uptime")
+    print cpcp.pmErrStr(s2)
 
     cdef int s3 = fg.add_metric("nfs4.client.reqs")
     print cpcp.pmErrStr(s3)
 
-    # cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
-    # print cpcp.pmErrStr(s4)
+    cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
+    print cpcp.pmErrStr(s4)
+
+    cdef int s5 = fg.add_metric("cgroup.cpuset.cpus")
+    print cpcp.pmErrStr(s5)
+
+    s5 = fg.add_metric("nvidia.memtotal")
+    print cpcp.pmErrStr(s5)
 
     cdef int fetch_sts
 
@@ -353,9 +318,16 @@ def get_stuff2():
 
         print "Timestamp {}".format(cpcp.pmtimevalToReal(&fg.timestamp))
 
-        for m in fg.metrics:
+        for m, mname in zip(fg.metrics, fg.metric_names):
             n = m.out_num
-            print "Num: {}, status: {}, error codes: {} <{}>, data: {}".format(n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), cpcp.pmErrStr(m.get_statuses()[0]), m.get_values())
+            if n > 0:
+                print "{}: Num: {}, status: {}, error codes: {} <{}>, data: {}".format(
+                    mname, n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), cpcp.pmErrStr(m.get_statuses()[0]), m.get_values()
+                )
+            else:
+                print "{}: No instances".format(mname)
+
+        print "===="
 
 
 

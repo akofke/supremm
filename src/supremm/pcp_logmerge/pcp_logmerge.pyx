@@ -205,7 +205,7 @@ cdef class Metric:
         metric.creation_status = cpcp.pmExtendFetchGroup_indom(
             fg,
             metric_name,
-            NULL,
+            "instant",  # Do not attempt to do rate-conversion or convert units/scale
             metric.out_inst_codes,
             metric.out_inst_names,
             metric.out_values,
@@ -326,6 +326,7 @@ def get_stuff():
 
 def get_stuff2():
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
+    # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/dev/shm/supremm-adkofke/mae/972366/cpn-p26-07")
     cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/job-972366-begin-20161229.23.06.00")
     fg.set_start(1)
     # cdef int s1 = fg.add_metric("hinv.map.cpu_node")
@@ -354,7 +355,7 @@ def get_stuff2():
 
         for m in fg.metrics:
             n = m.out_num
-            print "Num: {}, status: {}, error codes: {}, data: {}".format(n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), m.get_values())
+            print "Num: {}, status: {}, error codes: {} <{}>, data: {}".format(n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), cpcp.pmErrStr(m.get_statuses()[0]), m.get_values())
 
 
 

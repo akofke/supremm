@@ -73,7 +73,7 @@ setup(
     ],
     ext_modules=cythonize([
         Extension("supremm.pcpcinterface.pcpcinterface", ["src/supremm/pcpcinterface/pcpcinterface.pyx"], libraries=["pcp"], include_dirs=[numpy.get_include()]),
-        Extension("supremm.pcp_logmerge.pcp_logmerge", ["src/supremm/pcp_logmerge/pcp_logmerge.pyx"], libraries=["pcp"]),
+        Extension("supremm.pcp_logmerge.pcp_logmerge", ["src/supremm/pcp_logmerge/pcp_logmerge.pyx"], libraries=["pcp"], include_dirs=[numpy.get_include()]),
         Extension("supremm.pypmlogextract.pypmlogextract", ["src/supremm/pypmlogextract/pypmlogextract.pyx"])
     ])
 )

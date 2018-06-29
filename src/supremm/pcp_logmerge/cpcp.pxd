@@ -1,4 +1,5 @@
 from posix.types cimport pid_t
+from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
 
 cdef extern from "sys/time.h":
     cdef struct timeval:
@@ -15,8 +16,8 @@ cdef inline void pmtimevalFromReal(double secs, timeval *val):
 
 cdef extern from "pcp/pmapi.h":
 
-    const int PM_TZ_MAXLEN = 40
-    const int PM_LOG_MAXHOSTLEN = 64
+    const int PM_TZ_MAXLEN
+    const int PM_LOG_MAXHOSTLEN
     ctypedef struct pmLogLabel:
         int		ll_magic
         pid_t	ll_pi
@@ -42,13 +43,13 @@ cdef extern from "pcp/pmapi.h":
 
     ctypedef union pmAtomValue:
         # TODO use <inttypes.h> types instead of simple long etc.
-        char* cp
-        long l
-        unsigned long ul
-        long long ll
-        unsigned long long ull
+        int32_t l
+        uint32_t ul
+        int64_t ll
+        uint64_t ull
         float f
         double d
+        char* cp
 
     # double pmtimevalToReal(const timeval *val)
     #

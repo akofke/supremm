@@ -1,7 +1,11 @@
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from libc.stdlib cimport free
+from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
 
 import numpy as np
+cimport numpy as np
+np.import_array()
+
 import cpmapi as c_pmapi
 cimport cpcp
 
@@ -39,6 +43,7 @@ cdef class MergedArchives:
 
 
     cpdef add_metrics_required(self, list metrics):
+        pass
 
 
 
@@ -144,6 +149,47 @@ cdef class Metric:
         view = <int[:self.out_num]>self.out_statuses
         return view
 
+    cdef np.ndarray get_values(self):
+        cdef np.ndarray val_arr
+
+        # TODO: everything is converted to doubles to remain consistent with the current mechanism for now.
+        # As a separate change, fix this to return arrays of the correct integer types
+        if self.val_type == c_pmapi.PM_TYPE_32:
+            # val_arr = np.empty(self.out_num, dtype=np.int32)
+            val_arr = np.empty(self.out_num, dtype=np.double)
+            _fill_i32(self.out_num, self.out_values, val_arr)
+
+        elif self.val_type == c_pmapi.PM_TYPE_U32:
+            # val_arr = np.empty(self.out_num, dtype=np.uint32)
+            val_arr = np.empty(self.out_num, dtype=np.double)
+            _fill_u32(self.out_num, self.out_values, val_arr)
+
+        elif self.val_type == c_pmapi.PM_TYPE_64:
+            # val_arr = np.empty(self.out_num, dtype=np.int64)
+            val_arr = np.empty(self.out_num, dtype=np.double)
+            _fill_i64(self.out_num, self.out_values, val_arr)
+
+        elif self.val_type == c_pmapi.PM_TYPE_U64:
+            # val_arr = np.empty(self.out_num, dtype=np.uint64)
+            val_arr = np.empty(self.out_num, dtype=np.double)
+            _fill_u64(self.out_num, self.out_values, val_arr)
+
+        elif self.val_type == c_pmapi.PM_TYPE_FLOAT:
+            # val_arr = np.empty(self.out_num, dtype=np.single)
+            val_arr = np.empty(self.out_num, dtype=np.double)
+            _fill_float(self.out_num, self.out_values, val_arr)
+
+        elif self.val_type == c_pmapi.PM_TYPE_DOUBLE:
+            val_arr = np.empty(self.out_num, dtype=np.double)
+            _fill_double(self.out_num, self.out_values, val_arr)
+
+        elif self.val_type == c_pmapi.PM_TYPE_STRING:
+            val_arr = np.empty(self.out_num, dtype=np.object_)
+            _fill_string(self.out_num, self.out_values, val_arr)
+
+        return val_arr
+
+
     @staticmethod
     cdef create(cpcp.pmFG fg, char *metric_name, int num_instances, int val_type):
         cdef Metric metric = Metric.__new__(Metric)
@@ -170,6 +216,49 @@ cdef class Metric:
             &metric.out_status
         )
         return metric
+
+
+cdef _fill_i32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef double[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <double>values[i].l
+
+cdef _fill_u32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef double[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <double>values[i].ul
+
+cdef _fill_i64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef double[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <double>values[i].ll
+
+cdef _fill_u64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef double[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <double>values[i].ull
+
+cdef _fill_float(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef double[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <double>values[i].f
+
+cdef _fill_double(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef double[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <double>values[i].d
+
+cdef _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+    cdef object[:] view = arr
+    cdef unsigned int i
+    for i in range(n):
+        view[i] = <object>values[i].cp
 
 
 def get_stuff():
@@ -236,19 +325,20 @@ def get_stuff():
 
 
 def get_stuff2():
-    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
+    # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
+    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/job-972366-begin-20161229.23.06.00")
     fg.set_start(1)
-    cdef int s1 = fg.add_metric("hinv.map.cpu_node")
-    print cpcp.pmErrStr(s1)
-
-    cdef int s2 = fg.add_metric("kernel.all.uptime")
-    print cpcp.pmErrStr(s2)
+    # cdef int s1 = fg.add_metric("hinv.map.cpu_node")
+    # print cpcp.pmErrStr(s1)
+    #
+    # cdef int s2 = fg.add_metric("kernel.all.uptime")
+    # print cpcp.pmErrStr(s2)
 
     cdef int s3 = fg.add_metric("nfs4.client.reqs")
     print cpcp.pmErrStr(s3)
 
-    cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
-    print cpcp.pmErrStr(s4)
+    # cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
+    # print cpcp.pmErrStr(s4)
 
     cdef int fetch_sts
 
@@ -264,7 +354,7 @@ def get_stuff2():
 
         for m in fg.metrics:
             n = m.out_num
-            print "Num: {}, status: {}, error codes: {}".format(n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()))
+            print "Num: {}, status: {}, error codes: {}, data: {}".format(n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), m.get_values())
 
 
 

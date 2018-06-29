@@ -66,7 +66,20 @@ cdef class MergedArchives:
 
         return np.all(np.any(metric_success, axis=1))
 
+    def iter_data(self):
+        cdef ArchiveFetchGroup start_archive = self.archives[self.start_archive]
+        cdef cpcp.timeval start_ts = start_archive.get_start_from_loglabel()
+
+        cdef Py_ssize_t i
+        cdef ArchiveFetchGroup fg
+        for i in range(len(self.archives)):
+            fg = self.archives[i]
+            fg.set_start(start_ts)
+
+
+
 cdef class ArchiveFetchGroup:
+    cdef archive_path
     cdef int creation_status
     cdef cpcp.pmFG fg
     cdef dict indom_sizes
@@ -74,8 +87,9 @@ cdef class ArchiveFetchGroup:
     cdef list metric_names
     cdef cpcp.timeval timestamp
 
-    def __cinit__(self, str archive_path):
+    def __cinit__(self, archive_path):
         self.creation_status = cpcp.pmCreateFetchGroup(&self.fg, c_pmapi.PM_CONTEXT_ARCHIVE, archive_path)
+        self.archive_path = archive_path
         self.indom_sizes = {}
         self.metrics = []
         self.metric_names = []
@@ -87,6 +101,12 @@ cdef class ArchiveFetchGroup:
         if self.fg != <cpcp.pmFG>NULL:
             cpcp.pmDestroyFetchGroup(self.fg)
 
+
+    cdef cpcp.timeval get_start_from_loglabel(self):
+        cdef cpcp.pmLogLabel label
+        cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(self.fg))
+        cpcp.pmGetArchiveLabel(&label)
+        return label.ll_start
 
     cdef int set_start(self, double time):
         cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(self.fg))

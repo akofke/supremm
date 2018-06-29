@@ -173,36 +173,36 @@ cdef class Metric:
 
         # TODO: everything is converted to doubles to remain consistent with the current mechanism for now.
         # As a separate change, fix this to return arrays of the correct integer types
-        if self.val_type == c_pmapi.PM_TYPE_32:
+        if self.val_type == cpcp.PM_TYPE_32:
             # val_arr = np.empty(self.out_num, dtype=np.int32)
             val_arr = np.empty(self.out_num, dtype=np.double)
             _fill_i32(self.out_num, self.out_values, val_arr)
 
-        elif self.val_type == c_pmapi.PM_TYPE_U32:
+        elif self.val_type == cpcp.PM_TYPE_U32:
             # val_arr = np.empty(self.out_num, dtype=np.uint32)
             val_arr = np.empty(self.out_num, dtype=np.double)
             _fill_u32(self.out_num, self.out_values, val_arr)
 
-        elif self.val_type == c_pmapi.PM_TYPE_64:
+        elif self.val_type == cpcp.PM_TYPE_64:
             # val_arr = np.empty(self.out_num, dtype=np.int64)
             val_arr = np.empty(self.out_num, dtype=np.double)
             _fill_i64(self.out_num, self.out_values, val_arr)
 
-        elif self.val_type == c_pmapi.PM_TYPE_U64:
+        elif self.val_type == cpcp.PM_TYPE_U64:
             # val_arr = np.empty(self.out_num, dtype=np.uint64)
             val_arr = np.empty(self.out_num, dtype=np.double)
             _fill_u64(self.out_num, self.out_values, val_arr)
 
-        elif self.val_type == c_pmapi.PM_TYPE_FLOAT:
+        elif self.val_type == cpcp.PM_TYPE_FLOAT:
             # val_arr = np.empty(self.out_num, dtype=np.single)
             val_arr = np.empty(self.out_num, dtype=np.double)
             _fill_float(self.out_num, self.out_values, val_arr)
 
-        elif self.val_type == c_pmapi.PM_TYPE_DOUBLE:
+        elif self.val_type == cpcp.PM_TYPE_DOUBLE:
             val_arr = np.empty(self.out_num, dtype=np.double)
             _fill_double(self.out_num, self.out_values, val_arr)
 
-        elif self.val_type == c_pmapi.PM_TYPE_STRING:
+        elif self.val_type == cpcp.PM_TYPE_STRING:
             val_arr = np.empty(self.out_num, dtype=np.object_)
             _fill_string(self.out_num, self.out_values, val_arr)
 

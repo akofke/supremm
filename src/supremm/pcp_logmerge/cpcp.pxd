@@ -15,6 +15,19 @@ cdef inline void pmtimevalFromReal(double secs, timeval *val):
     val.tv_usec = <long>(<long double>(secs - val.tv_sec) * <long double>1000000 + <long double>0.5)
 
 cdef extern from "pcp/pmapi.h":
+    int PM_TYPE_NOSUPPORT
+    int PM_TYPE_32
+    int PM_TYPE_U32
+    int PM_TYPE_64
+    int PM_TYPE_U64
+    int PM_TYPE_FLOAT
+    int PM_TYPE_DOUBLE
+    int PM_TYPE_STRING
+    int PM_TYPE_AGGREGATE
+    int PM_TYPE_AGGREGATE_STATIC
+    int PM_TYPE_EVENT
+    int PM_TYPE_HIGHRES_EVENT
+    int PM_TYPE_UNKNOWN
 
     const int PM_TZ_MAXLEN
     const int PM_LOG_MAXHOSTLEN

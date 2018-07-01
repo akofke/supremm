@@ -1,6 +1,7 @@
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from libc.stdlib cimport free
 from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
+import heapq
 
 import numpy as np
 cimport numpy as np
@@ -40,7 +41,8 @@ cdef class MergedArchives:
     cdef int start_archive
 
     def __cinit__(self, list archives, int start_archive):
-        self.archives = (ArchiveFetchGroup(path) for path in archives)
+        # TODO: error handling here
+        self.archives = tuple(ArchiveFetchGroup(path) for path in archives)
         self.start_archive = start_archive
 
 
@@ -58,6 +60,7 @@ cdef class MergedArchives:
 
         cdef Py_ssize_t i_arch
         cdef Py_ssize_t i_met
+        cdef ArchiveFetchGroup arch_fg
         for i_arch, arch_fg in enumerate(self.archives):
             for i_met, metric in enumerate(metrics):
                 err = arch_fg.add_metric(metric)
@@ -69,12 +72,34 @@ cdef class MergedArchives:
     def iter_data(self):
         cdef ArchiveFetchGroup start_archive = self.archives[self.start_archive]
         cdef cpcp.timeval start_ts = start_archive.get_start_from_loglabel()
+        cdef list archive_queue = []
 
         cdef Py_ssize_t i
         cdef ArchiveFetchGroup fg
         for i in range(len(self.archives)):
             fg = self.archives[i]
-            fg.set_start(start_ts)
+            fg.set_start_ts(&start_ts)
+            # TODO: error handling here
+            print cpcp.pmErrStr(fg.fetch())
+            print cpcp.pmtimevalToReal(&fg.timestamp)
+
+            heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
+
+        cdef double timestamp
+        cdef int fetch_err
+        print archive_queue
+        while archive_queue:  # while there are archives in the queue
+            timestamp, fg = heapq.heappop(archive_queue)  # get the fetchgroup with the lowest timestamp
+            print "{} at {}".format(fg.archive_path, timestamp)
+            fetch_err = fg.fetch()
+            if fetch_err != c_pmapi.PM_ERR_EOL:
+                heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
+            else:
+                print "{} EOL".format(fg.archive_path)
+
+
+
+
 
 
 
@@ -113,6 +138,10 @@ cdef class ArchiveFetchGroup:
         cdef cpcp.timeval tv
         cpcp.pmtimevalFromReal(time, &tv)
         return cpcp.pmSetMode(c_pmapi.PM_MODE_FORW, &tv, 0)
+
+    cdef int set_start_ts(self, cpcp.timeval *tv):
+        cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(self.fg))
+        return cpcp.pmSetMode(c_pmapi.PM_MODE_FORW, tv, 0)
 
     cdef int fetch(self):
         return cpcp.pmFetchGroup(self.fg)
@@ -303,7 +332,7 @@ cdef _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 def get_stuff2():
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/dev/shm/supremm-adkofke/mae/972366/cpn-p26-07")
-    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/job-972366-begin-20161229.23.06.00")
+    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/home/alex/pcplogs/job-972366-begin-20161229.23.06.00")
     fg.set_start(1)
     cdef int s1 = fg.add_metric("hotproc.io.write_bytes")
     print cpcp.pmErrStr(s1)

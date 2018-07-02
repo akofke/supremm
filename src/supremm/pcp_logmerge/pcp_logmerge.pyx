@@ -2,6 +2,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from libc.stdlib cimport free
 from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
 import heapq
+import logging
 
 import numpy as np
 cimport numpy as np
@@ -9,6 +10,9 @@ np.import_array()
 
 import cpmapi as c_pmapi
 cimport cpcp
+
+cdef np.ndarray EMPTY_I32_ARR = np.empty(0, dtype=np.int32)
+cdef np.ndarray EMPTY_STR_ARR = np.empty(0, dtype=np.object_)
 
 
 cdef class Pool:
@@ -39,11 +43,13 @@ cdef class Pool:
 cdef class MergedArchives:
     cdef tuple archives
     cdef int start_archive
+    cdef object end_archive_name
 
-    def __cinit__(self, list archives, int start_archive):
+    def __cinit__(self, list archives, object start_archive, object end_archive_name):
         # TODO: error handling here
         self.archives = tuple(ArchiveFetchGroup(path) for path in archives)
         self.start_archive = start_archive
+        self.end_archive_name = end_archive_name
 
 
     cpdef add_metrics_required(self, list metrics):
@@ -63,11 +69,24 @@ cdef class MergedArchives:
         cdef ArchiveFetchGroup arch_fg
         for i_arch, arch_fg in enumerate(self.archives):
             for i_met, metric in enumerate(metrics):
-                err = arch_fg.add_metric(metric)
-                if err != 0:
+                err = arch_fg.maybe_add_metric(metric)
+                if err == 0:
                     metric_success[i_met, i_arch] = True
 
-        return np.all(np.any(metric_success, axis=1))
+        success = np.all(np.any(metric_success, axis=1))
+        cdef np.ndarray extend_errors
+        if success:
+            for arch_fg in self.archives:
+                extend_errors = arch_fg.finalize_pending_metrics()
+                if np.any(extend_errors != 0):
+                    logging.warning("Unexpected error extending fetchgroup for archive %s: %s", arch_fg.archive_path, extend_errors)
+                    return False  # Note in this case we will have "orphan" Metrics
+
+        else:
+            for arch_fg in self.archives:
+                arch_fg.abort_pending_metrics()
+
+        return success
 
     def iter_data(self):
         cdef ArchiveFetchGroup start_archive = self.archives[self.start_archive]
@@ -87,20 +106,27 @@ cdef class MergedArchives:
 
         cdef double timestamp
         cdef int fetch_err
-        print archive_queue
+        cdef dict metrics = {}
+        cdef Metric metric
         while archive_queue:  # while there are archives in the queue
             timestamp, fg = heapq.heappop(archive_queue)  # get the fetchgroup with the lowest timestamp
             print "{} at {}".format(fg.archive_path, timestamp)
+
+            metrics = {}  # or clear? are things going to keep a reference to the yielded dict?
+            for i in range(len(fg.metrics)):
+                metric = fg.metrics[i]
+                if metric.out_num > 0 and metric.out_status == 0:
+                    metrics[fg.metric_names[i]] = (metric.get_values(), metric.get_inst_codes(), metric.get_inst_names())
+
+            yield (timestamp, metrics)
+
             fetch_err = fg.fetch()
             if fetch_err != c_pmapi.PM_ERR_EOL:
                 heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
             else:
                 print "{} EOL".format(fg.archive_path)
-
-
-
-
-
+                if fg.archive_path == self.end_archive_name:
+                    break
 
 
 cdef class ArchiveFetchGroup:
@@ -111,6 +137,7 @@ cdef class ArchiveFetchGroup:
     cdef list metrics
     cdef list metric_names
     cdef cpcp.timeval timestamp
+    cdef list pending_metrics
 
     def __cinit__(self, archive_path):
         self.creation_status = cpcp.pmCreateFetchGroup(&self.fg, c_pmapi.PM_CONTEXT_ARCHIVE, archive_path)
@@ -118,6 +145,7 @@ cdef class ArchiveFetchGroup:
         self.indom_sizes = {}
         self.metrics = []
         self.metric_names = []
+        self.pending_metrics = []
 
         if not self.creation_status < 0:
             cpcp.pmExtendFetchGroup_timestamp(self.fg, &self.timestamp)
@@ -150,7 +178,7 @@ cdef class ArchiveFetchGroup:
         cdef int num_instances
         cdef int *instlist
         cdef char **namelist
-        if indom == c_pmapi.PM_INDOM_NULL:
+        if indom == cpcp.PM_INDOM_NULL:
             return 1
         if indom in self.indom_sizes:
             num_instances = self.indom_sizes[indom]
@@ -188,7 +216,7 @@ cdef class ArchiveFetchGroup:
         if num_instances < 0:
             return num_instances
 
-        cdef Metric metric = Metric.create(self.fg, name, num_instances, desc.type)
+        cdef Metric metric = Metric.create(self.fg, name, num_instances, desc.type, desc.indom)
         if metric.creation_status < 0:
             return metric.creation_status  # error extending, return the error code and the Metric will go out of scope now
         else:
@@ -196,10 +224,62 @@ cdef class ArchiveFetchGroup:
             self.metric_names.append(metric_name)
             return 0
 
+    cdef int maybe_add_metric(self, metric_name):
+        """
+        Add a metric in a "transaction" manner. Looks up the metric name and indom and adds the metric information
+        to a pending list, but does not create the Metric struct. The most common errors (metric does not exist in
+        the archive) will be caught and returned here, where the adding code can cancel the transaction with
+        abort_pending_metrics if needed. If the transaction succeeds, call finalize_pending_metrics to complete
+        adding the metrics to the fetchgroup.
+        """
+        # maybe it's faster to check the current context first? pmUseContext doesn't appear to do that.
+        cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(self.fg))
+
+        cdef cpcp.pmID pmid
+        cdef char *name = metric_name
+        cdef int name_sts = cpcp.pmLookupName(1, &name, &pmid)
+        if name_sts < 0:
+            return name_sts
+
+        cdef cpcp.pmDesc desc
+        cdef int desc_sts = cpcp.pmLookupDesc(pmid, &desc)
+        if desc_sts < 0:
+            return desc_sts
+
+        cdef int num_instances = self.get_indom_size(desc.indom)
+        if num_instances < 0:
+            return num_instances
+
+        self.pending_metrics.append((metric_name, num_instances, desc.type, desc.indom))
+        return 0
+
+    cdef void abort_pending_metrics(self):
+        self.pending_metrics = []
+
+    cdef np.ndarray finalize_pending_metrics(self):
+        cdef int num_instances, val_type
+        cdef cpcp.pmInDom indom
+        cdef Metric metric
+        cdef np.ndarray errors = np.zeros(len(self.pending_metrics))
+        cdef Py_ssize_t i
+        for i, (metric_name, num_instances, val_type, indom) in enumerate(self.pending_metrics):
+            metric = Metric.create(self.fg, metric_name, num_instances, val_type, indom)
+            errors[i] = metric.creation_status
+            if metric.creation_status == 0:
+                self.metrics.append(metric)
+                self.metric_names.append(metric_name)
+            else:
+                pass # do something else?
+
+        self.pending_metrics = []
+        return errors
+
+
 
 cdef class Metric:
     cdef int num_instances
     cdef int val_type
+    cdef cpcp.pmInDom indom
     cdef Pool pool
     cdef int creation_status
 
@@ -210,11 +290,30 @@ cdef class Metric:
     cdef unsigned int out_num
     cdef int out_status
 
-    cdef get_statuses(self):
-        cdef int[:] view
+    cdef np.ndarray get_inst_codes(self):
+        if self.indom == cpcp.PM_INDOM_NULL:
+            return EMPTY_I32_ARR
+        cdef np.ndarray inst_codes = np.empty(self.out_num, dtype=np.int32)
+        cdef int[:] view = inst_codes
+        cdef int i
+        for i in range(self.out_num):
+            view[i] = self.out_inst_codes[i]
+        return inst_codes
+
+    cdef np.ndarray get_inst_names(self):
+        if self.indom == cpcp.PM_INDOM_NULL:
+            return EMPTY_STR_ARR
+        cdef np.ndarray inst_names = np.empty(self.out_num, dtype=np.object_)
+        cdef object[:] view = inst_names
+        cdef int i
+        for i in range(self.out_num):
+            view[i] = <object>self.out_inst_names[i]
+        return inst_names
+
+    cdef int[:] get_statuses(self):
         if self.out_num == 0:
             return None
-        view = <int[:self.out_num]>self.out_statuses
+        cdef int [:] view = <int[:self.out_num]>self.out_statuses
         return view
 
     cdef np.ndarray get_values(self):
@@ -259,10 +358,11 @@ cdef class Metric:
 
 
     @staticmethod
-    cdef create(cpcp.pmFG fg, char *metric_name, int num_instances, int val_type):
+    cdef create(cpcp.pmFG fg, char *metric_name, int num_instances, int val_type, cpcp.pmInDom indom):
         cdef Metric metric = Metric.__new__(Metric)
         metric.num_instances = num_instances
         metric.val_type = val_type
+        metric.indom = indom
         metric.pool = Pool()
 
         metric.out_inst_codes = <int *>metric.pool.malloc(num_instances * sizeof(int))
@@ -332,28 +432,28 @@ cdef _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 def get_stuff2():
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/dev/shm/supremm-adkofke/mae/972366/cpn-p26-07")
-    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/home/alex/pcplogs/job-972366-begin-20161229.23.06.00")
+    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161229.00.10")
     fg.set_start(1)
-    cdef int s1 = fg.add_metric("hotproc.io.write_bytes")
-    print cpcp.pmErrStr(s1)
-
-    s1 = fg.add_metric("hinv.map.cpu_node")
-    print cpcp.pmErrStr(s1)
-
-    cdef int s2 = fg.add_metric("kernel.all.uptime")
-    print cpcp.pmErrStr(s2)
-
-    cdef int s3 = fg.add_metric("nfs4.client.reqs")
-    print cpcp.pmErrStr(s3)
+    # cdef int s1 = fg.add_metric("hotproc.io.write_bytes")
+    # print cpcp.pmErrStr(s1)
+    #
+    # s1 = fg.add_metric("hinv.map.cpu_node")
+    # print cpcp.pmErrStr(s1)
+    #
+    # cdef int s2 = fg.add_metric("kernel.all.uptime")
+    # print cpcp.pmErrStr(s2)
+    #
+    # cdef int s3 = fg.add_metric("nfs4.client.reqs")
+    # print cpcp.pmErrStr(s3)
 
     cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
     print cpcp.pmErrStr(s4)
-
-    cdef int s5 = fg.add_metric("cgroup.cpuset.cpus")
-    print cpcp.pmErrStr(s5)
-
-    s5 = fg.add_metric("nvidia.memtotal")
-    print cpcp.pmErrStr(s5)
+    #
+    # cdef int s5 = fg.add_metric("cgroup.cpuset.cpus")
+    # print cpcp.pmErrStr(s5)
+    #
+    # s5 = fg.add_metric("nvidia.memtotal")
+    # print cpcp.pmErrStr(s5)
 
     cdef int fetch_sts
 

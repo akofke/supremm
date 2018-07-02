@@ -29,6 +29,8 @@ cdef extern from "pcp/pmapi.h":
     int PM_TYPE_HIGHRES_EVENT
     int PM_TYPE_UNKNOWN
 
+    int PM_INDOM_NULL
+
     const int PM_TZ_MAXLEN
     const int PM_LOG_MAXHOSTLEN
     ctypedef struct pmLogLabel:

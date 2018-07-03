@@ -1,6 +1,7 @@
 """ Container class for an HPC job """
 #pylint: disable=import-error
 import datetime
+import os
 
 from sys import version as python_version
 if python_version.startswith("2.6"):
@@ -69,6 +70,7 @@ def datetimeconvert(intime):
     else:
         return safe_strptime(intime, "%Y-%m-%dT%H:%M:%S")
 
+
 class Job(object):
     """ Contains the data for a job. """
     # pylint: disable=too-many-instance-attributes
@@ -102,12 +104,14 @@ class Job(object):
         return "jobid=%s nodes=%s walltime=%s" % (self.job_id, self._nodecount, self.walltime)
 
     def setjobdir(self, jobdir):
+        # TODO: not needed
         """
         Set job dir
         """
         self.jobdir = jobdir
 
     def addnodearchive(self, nodename, node_archive):
+        # TODO: not needed
         """
         Add the path to the node archive to the list archives for the job
         """
@@ -127,6 +131,7 @@ class Job(object):
                 yield nodename, nodedata.rawarchives
 
     def nodearchives(self):
+        # TODO: not needed
         """ iterator for the combined archives for the nodes in the job """
         for nodename, nodedata in self._nodes.iteritems():
             if nodedata.archive != None:
@@ -142,6 +147,7 @@ class Job(object):
         return False
 
     def has_enough_raw_archives(self):
+        # TODO: is this needed?
         """ are there enough raw archives for this job to try pmlogextract"""
 
         num_archives = 0
@@ -156,6 +162,7 @@ class Job(object):
             return False
 
     def has_enough_combined_archives(self):
+        # TODO: not needed
         """ are there enough combined archives for this job to try summarization"""
 
         num_archives = 0
@@ -170,6 +177,7 @@ class Job(object):
             return False
 
     def setnodebeginend(self, node, begin, end):
+        # TODO: probably not needed
         """
         Set the begin and end times for the given node. If either
         begin or end is None then the default time from the accounting
@@ -181,6 +189,7 @@ class Job(object):
             self._nodeend[node] = end
 
     def getnodebegin(self, node):
+        # TODO: probably not needed
         """
         Get the start time for job data on the given node
         """
@@ -190,6 +199,7 @@ class Job(object):
             return self.start_datetime
 
     def getnodeend(self, node):
+        # TODO: probably not needed
         """
         Get end time for job data on the given node
         """
@@ -257,3 +267,19 @@ class Job(object):
         if name in self._data:
             return self._data[name]
         return None
+
+    def get_start_archive(self, node_name):
+        start_archive = "job-{}-begin".format(self.job_id)
+        for idx, archive_path in enumerate(self._nodes[node_name].rawarchives):
+            filename = os.path.basename(archive_path)
+            if filename.startswith(start_archive):
+                return idx, archive_path
+        return None, None
+
+    def get_end_archive(self, node_name):
+        end_archive = "job-{}-end".format(self.job_id)
+        for idx, archive_path in enumerate(self._nodes[node_name].rawarchives):
+            filename = os.path.basename(archive_path)
+            if filename.startswith(end_archive):
+                return idx, archive_path
+        return None, None

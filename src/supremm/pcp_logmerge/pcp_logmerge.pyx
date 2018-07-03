@@ -42,15 +42,27 @@ cdef class Pool:
 
 cdef class MergedArchives:
     cdef tuple archives
-    cdef int start_archive
+    cdef np.ndarray status_codes
+    cdef object start_archive
+    cdef double start_ts
     cdef object end_archive_name
+    cdef double end_ts
 
-    def __cinit__(self, list archives, object start_archive, object end_archive_name):
+    def __cinit__(self, list archives, start_archive=None, start_timestamp=None, end_archive_name=None, end_timestamp=None):
         # TODO: error handling here
-        self.archives = tuple(ArchiveFetchGroup(path) for path in archives)
+        cdef tuple all_archives = tuple(ArchiveFetchGroup(path) for path in archives)
+        self.status_codes = np.array(fg.creation_status for fg in all_archives)
+        self.archives = tuple(fg for fg in all_archives if fg.creation_status == 0)
+
         self.start_archive = start_archive
         self.end_archive_name = end_archive_name
+        if start_archive is None:
+            self.start_ts = start_timestamp
+        if end_archive_name is None:
+            self.end_ts = end_timestamp
 
+    cpdef np.ndarray get_status_codes(self):
+        return self.status_codes
 
     cpdef add_metrics_required(self, list metrics):
         """
@@ -89,8 +101,18 @@ cdef class MergedArchives:
         return success
 
     def iter_data(self):
-        cdef ArchiveFetchGroup start_archive = self.archives[self.start_archive]
-        cdef cpcp.timeval start_ts = start_archive.get_start_from_loglabel()
+        cdef ArchiveFetchGroup start_archive
+        cdef cpcp.timeval start_ts
+        if self.start_archive is not None:
+            # If the start archive was given, grab the precise start time of that archive
+            # and use it as the start time for all archives
+            start_archive = self.archives[self.start_archive]
+            start_ts = start_archive.get_start_from_loglabel()
+        else:
+            # otherwise fall back to the less precise job start time from the database (only second precision)
+            start_ts = cpcp.pmtimevalFromReal(self.start_ts)
+
+
         cdef list archive_queue = []
 
         cdef Py_ssize_t i
@@ -110,6 +132,9 @@ cdef class MergedArchives:
         cdef Metric metric
         while archive_queue:  # while there are archives in the queue
             timestamp, fg = heapq.heappop(archive_queue)  # get the fetchgroup with the lowest timestamp
+            if self.end_archive_name is None and timestamp > self.end_ts:
+                # If the end archive was not given, stop once we're past the coarse job end time
+                break
             print "{} at {}".format(fg.archive_path, timestamp)
 
             metrics = {}  # or clear? are things going to keep a reference to the yielded dict?
@@ -126,12 +151,14 @@ cdef class MergedArchives:
             else:
                 print "{} EOL".format(fg.archive_path)
                 if fg.archive_path == self.end_archive_name:
+                    # If the end archive was given, once that archive ends the iteration is done
+                    # (i.e. don't keep processing the daily archive)
                     break
 
 
 cdef class ArchiveFetchGroup:
     cdef archive_path
-    cdef int creation_status
+    cdef readonly int creation_status
     cdef cpcp.pmFG fg
     cdef dict indom_sizes
     cdef list metrics

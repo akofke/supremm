@@ -92,13 +92,16 @@ cdef class MergedArchives:
                 extend_errors = arch_fg.finalize_pending_metrics()
                 if np.any(extend_errors != 0):
                     logging.warning("Unexpected error extending fetchgroup for archive %s: %s", arch_fg.archive_path, extend_errors)
-                    return False  # Note in this case we will have "orphan" Metrics
+                    return False  # Note in this case we will have "orphan" Metrics (registered but will never be used)
 
         else:
             for arch_fg in self.archives:
                 arch_fg.abort_pending_metrics()
 
         return success
+
+    def clear_metrics(self):
+        pass
 
     def iter_data(self):
         cdef ArchiveFetchGroup start_archive
@@ -219,6 +222,11 @@ cdef class ArchiveFetchGroup:
                 free(namelist)
             self.indom_sizes[indom] = num_instances
             return num_instances
+
+    cdef int clear_metrics(self):
+        cdef int sts = cpcp.pmClearFetchGroup(self.fg)
+        self.metrics = []
+        self.metric_names = []
 
     cdef int add_metric(self, metric_name):
         # Note about metric_name string: when cython implicitly converts a python string to a char *, the pointer

@@ -101,7 +101,9 @@ cdef class MergedArchives:
         return success
 
     def clear_metrics(self):
-        pass
+        cdef ArchiveFetchGroup fg
+        for fg in self.archives:
+            fg.clear_metrics()
 
     def iter_data(self):
         cdef ArchiveFetchGroup start_archive
@@ -144,19 +146,24 @@ cdef class MergedArchives:
             for i in range(len(fg.metrics)):
                 metric = fg.metrics[i]
                 if metric.out_num > 0 and metric.out_status == 0:
+                    # TODO: do something when *all* metrics have errors?
                     metrics[fg.metric_names[i]] = (metric.get_values(), metric.get_inst_codes(), metric.get_inst_names())
 
             yield (timestamp, metrics)
 
             fetch_err = fg.fetch()
-            if fetch_err != c_pmapi.PM_ERR_EOL:
+            if fetch_err >= 0:
                 heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
-            else:
+            elif fetch_err == c_pmapi.PM_ERR_EOL:
                 print "{} EOL".format(fg.archive_path)
                 if fg.archive_path == self.end_archive_name:
                     # If the end archive was given, once that archive ends the iteration is done
                     # (i.e. don't keep processing the daily archive)
                     break
+            else:
+                # TODO: fetch should only return other error codes for "severe fetch errors"
+                pass
+
 
 
 cdef class ArchiveFetchGroup:
@@ -227,6 +234,7 @@ cdef class ArchiveFetchGroup:
         cdef int sts = cpcp.pmClearFetchGroup(self.fg)
         self.metrics = []
         self.metric_names = []
+        return sts
 
     cdef int add_metric(self, metric_name):
         # Note about metric_name string: when cython implicitly converts a python string to a char *, the pointer

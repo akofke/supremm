@@ -8,6 +8,10 @@ from supremm.rangechange import RangeChange
 from supremm.pcp_logmerge.pcp_logmerge import MergedArchives
 
 
+VERSION = "1.0.6"
+TIMESERIES_VERSION = 4
+
+
 def datetime_to_timestamp(dt):
     return (dt - datetime.datetime.utcfromtimestamp(0)).total_seconds()
 
@@ -21,8 +25,9 @@ class Summarize(object):
         self.errors = {}
         self.job = job
         self.start = time.time()
-        self.archives_processed = 0
+        self.nodes_processed = 0
         self.fail_fast = fail_fast
+        self._good_enough = True
 
         self.rangechange = RangeChange(config)
 
@@ -35,16 +40,91 @@ class Summarize(object):
         else:
             self.errors[category].add(errormsg)
 
+    def complete(self):
+        """ A job is complete if archives exist for all assigned nodes and they have
+            been processed successfully
+        """
+        return self.job.nodecount == self.nodes_processed
+
+    def get(self):
+        """ Return a dict with the summary information """
+        output = {}
+        timeseries = {}
+
+        je = self.job.get_errors()
+        if len(je) > 0:
+            self.adderror("job", je)
+
+        if self.job.nodecount > 0:
+            for analytic in self.alltimestamps:
+                if analytic.status != "uninitialized":
+                    if analytic.mode == "all":
+                        output[analytic.name] = analytic.results()
+                    if analytic.mode == "timeseries":
+                        timeseries[analytic.name] = analytic.results()
+            for analytic in self.firstlast:
+                if analytic.status != "uninitialized":
+                    output[analytic.name] = analytic.results()
+
+        output['summarization'] = {
+            "version": VERSION,
+            "elapsed": time.time() - self.start,
+            "created": time.time(),
+            "srcdir": self.job.jobdir,
+            "complete": self.complete()}
+
+        output['created'] = datetime.datetime.utcnow()
+
+        output['acct'] = self.job.acct
+        output['acct']['id'] = self.job.job_id
+
+        if len(timeseries) > 0:
+            timeseries['hosts'] = dict((str(idx), name) for name, idx, _ in self.job.nodearchives())
+            timeseries['version'] = TIMESERIES_VERSION
+            output['timeseries'] = timeseries
+
+        for preproc in self.preprocs:
+            result = preproc.results()
+            if result is not None:
+                output.update(result)
+
+        for source, data in self.job.data().iteritems():
+            if 'errors' in data:
+                self.adderror(source, str(data['errors']))
+
+        if len(self.errors) > 0:
+            output['errors'] = {}
+            for k, v in self.errors.iteritems():
+                output['errors'][k] = list(v)
+
+        return output
+
     def process(self):
-        success = 0
-        self.archives_processed = 0
+        success = True
+        self.nodes_processed = 0
+        nodes_skipped = 0
 
         # TODO fix methods on job class
         for node_name, job_node in self.job._nodes.iteritems():
             # process archive
             node_id = job_node.nodeindex
             node_archives = job_node.rawarchives
-            pass
+            result = self.process_node(node_name, node_id, node_archives)
+            if result:
+                self.nodes_processed += 1
+            else:
+                nodes_skipped += 1
+                success = False
+                logging.debug("Skipping node %s for job %s", node_name, self.job)
+            if nodes_skipped > 0.05 * self.job.nodecount:
+                logging.debug(
+                    "%s out of %s nodes skipped for job %s, aborting job",
+                    nodes_skipped, self.job.nodecount, self.job
+                )
+                self._good_enough = False
+                return False
+
+        return success
 
     def process_node(self, node_name, node_idx, archives):
         start_archive_idx, _ = self.job.get_start_archive(node_name)
@@ -52,8 +132,13 @@ class Summarize(object):
         _, end_archive_name = self.job.get_end_archive(node_name)
         end_ts = datetime_to_timestamp(self.job.end_datetime) if end_archive_name is None else None
         merged_archives = MergedArchives(archives, start_archive_idx, start_ts, end_archive_name, end_ts)
-        
-        # check error codes
+
+        if np.all(merged_archives.get_status_codes() != 0):
+            # None of the archives could be opened, indicate failure for this node
+            return False
+
+        self.process_preprocs(node_name, node_idx, merged_archives)
+        merged_archives.clear_metrics()
 
         pass
 
@@ -82,6 +167,9 @@ class Summarize(object):
             process_entry_preprocs(preprocs_used, preproc_status, timestamp, metrics)
             if all(preproc_status.itervalues()):
                 break
+
+    def process_analytics(self, node_name, node_idx, merged_archives):
+        pass
 
 
 def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):

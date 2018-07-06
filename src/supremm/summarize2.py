@@ -1,6 +1,7 @@
 import logging
 import time
 import datetime
+import itertools
 
 import numpy as np
 
@@ -45,6 +46,12 @@ class Summarize(object):
             been processed successfully
         """
         return self.job.nodecount == self.nodes_processed
+
+    def good_enough(self):
+        """ A job is good_enough if archives for 95% of nodes have
+            been processed sucessfullly
+        """
+        return self._good_enough
 
     def get(self):
         """ Return a dict with the summary information """
@@ -140,7 +147,7 @@ class Summarize(object):
         self.process_preprocs(node_name, node_idx, merged_archives)
         merged_archives.clear_metrics()
 
-        pass
+        return True
 
     def process_preprocs(self, node_name, node_idx, merged_archives):
         # list of tuples of the plugin instance with its metric list that was chosen.
@@ -167,6 +174,9 @@ class Summarize(object):
             process_entry_preprocs(preprocs_used, preproc_status, timestamp, metrics)
             if all(preproc_status.itervalues()):
                 break
+
+        for preproc, _ in preprocs_used:
+            preproc.hostend()
 
     def process_analytics(self, node_name, node_idx, merged_archives):
         pass
@@ -195,14 +205,15 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
                 #        ['value3', 3]], dtype=object)
                 data.append(np.column_stack((vals, inst_codes)))
 
-                description.append({inst_codes[i]: inst_names[i] for i in xrange(len(inst_codes))})
+                description.append({inst_codes[i]: inst_names[i] for i in xrange(len(inst_names))})
             else:
                 # Metric is not present at this timestamp, use a placeholder
                 data.append([])
                 description.append({})
 
         if has_some_data:
-            preproc_status[preproc] = preproc.process(timestamp, np.array(data), description)
+            # preproc returns True if it wants more data, so set done to False
+            preproc_status[preproc] = not preproc.process(timestamp, np.array(data), description)
 
 
 def register_plugin(plugin, merged_archives):
@@ -212,18 +223,23 @@ def register_plugin(plugin, merged_archives):
     or an empty list if none of the plugin's alternatives could be added.
     """
     metrics = []
-    if isinstance(plugin.required_metrics[0], list):
-        for alternative in plugin.required_metrics:
+    # First condition checks if requiredMetrics is empty. Shouldn't happen but
+    # otherwise is an IndexError
+    if plugin.requiredMetrics and isinstance(plugin.requiredMetrics[0], list):
+        for alternative in plugin.requiredMetrics:
             success = merged_archives.add_metrics_required(alternative)
             if success:
                 metrics.extend(alternative)
                 break
     else:
-        success = merged_archives.add_metrics_required(plugin.required_metrics)
+        success = merged_archives.add_metrics_required(plugin.requiredMetrics)
         if success:
-            metrics.extend(plugin.required_metrics)
+            metrics.extend(plugin.requiredMetrics)
 
-    # TODO: optional metrics
+    if plugin.optionalMetrics:
+        added = merged_archives.add_metrics_optional(plugin.optionalMetrics)
+        metrics.extend(added)
+
     return metrics
 
 

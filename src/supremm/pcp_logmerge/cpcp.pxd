@@ -108,4 +108,4 @@ cdef extern from "pcp/pmapi.h":
 
     int pmDestroyFetchGroup(pmFG pmfg)
 
-    int pmClearFetchGroup(pmFG pmfg)
+    # int pmClearFetchGroup(pmFG pmfg)

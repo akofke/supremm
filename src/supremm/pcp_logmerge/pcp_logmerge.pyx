@@ -51,7 +51,7 @@ cdef class MergedArchives:
     def __cinit__(self, list archives, start_archive=None, start_timestamp=None, end_archive_name=None, end_timestamp=None):
         # TODO: error handling here
         cdef tuple all_archives = tuple(ArchiveFetchGroup(path) for path in archives)
-        self.status_codes = np.array(fg.creation_status for fg in all_archives)
+        self.status_codes = np.array(tuple(fg.creation_status for fg in all_archives))
         self.archives = tuple(fg for fg in all_archives if fg.creation_status == 0)
 
         self.start_archive = start_archive
@@ -100,6 +100,22 @@ cdef class MergedArchives:
 
         return success
 
+    cpdef add_metrics_optional(self, list metrics):
+        cdef list successful_metrics = []
+        cdef np.ndarray success = np.full(len(metrics), False)
+        cdef ArchiveFetchGroup fg
+        cdef int sts
+        cdef int i
+        for fg in self.archives:
+            for i, metric in enumerate(metrics):
+                sts = fg.add_metric(metric)
+                if sts == 0:
+                    success[i] = True
+        for i in range(len(success)):
+            if success[i]:
+                successful_metrics.append(metrics[i])
+        return successful_metrics
+
     def clear_metrics(self):
         cdef ArchiveFetchGroup fg
         for fg in self.archives:
@@ -115,7 +131,7 @@ cdef class MergedArchives:
             start_ts = start_archive.get_start_from_loglabel()
         else:
             # otherwise fall back to the less precise job start time from the database (only second precision)
-            start_ts = cpcp.pmtimevalFromReal(self.start_ts)
+            cpcp.pmtimevalFromReal(self.start_ts, &start_ts)
 
 
         cdef list archive_queue = []
@@ -140,7 +156,7 @@ cdef class MergedArchives:
             if self.end_archive_name is None and timestamp > self.end_ts:
                 # If the end archive was not given, stop once we're past the coarse job end time
                 break
-            print "{} at {}".format(fg.archive_path, timestamp)
+            # print "{} at {}".format(fg.archive_path, timestamp)
 
             metrics = {}  # or clear? are things going to keep a reference to the yielded dict?
             for i in range(len(fg.metrics)):
@@ -155,7 +171,7 @@ cdef class MergedArchives:
             if fetch_err >= 0:
                 heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
             elif fetch_err == c_pmapi.PM_ERR_EOL:
-                print "{} EOL".format(fg.archive_path)
+                # print "{} EOL".format(fg.archive_path)
                 if fg.archive_path == self.end_archive_name:
                     # If the end archive was given, once that archive ends the iteration is done
                     # (i.e. don't keep processing the daily archive)
@@ -228,13 +244,16 @@ cdef class ArchiveFetchGroup:
                 free(instlist)
                 free(namelist)
             self.indom_sizes[indom] = num_instances
-            return num_instances
+
+        return num_instances
 
     cdef int clear_metrics(self):
-        cdef int sts = cpcp.pmClearFetchGroup(self.fg)
-        self.metrics = []
-        self.metric_names = []
-        return sts
+        # TODO: pmClearFetchGroup is not available in 3.12
+        pass
+        # cdef int sts = cpcp.pmClearFetchGroup(self.fg)
+        # self.metrics = []
+        # self.metric_names = []
+        # return sts
 
     cdef int add_metric(self, metric_name):
         # Note about metric_name string: when cython implicitly converts a python string to a char *, the pointer
@@ -335,7 +354,8 @@ cdef class Metric:
 
     cdef np.ndarray get_inst_codes(self):
         if self.indom == cpcp.PM_INDOM_NULL:
-            return EMPTY_I32_ARR
+            # TODO: this emulates what puffypcp does
+            return np.full(1, -1, dtype=np.int32)
         cdef np.ndarray inst_codes = np.empty(self.out_num, dtype=np.int32)
         cdef int[:] view = inst_codes
         cdef int i

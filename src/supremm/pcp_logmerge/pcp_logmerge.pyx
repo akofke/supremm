@@ -1,3 +1,4 @@
+# cython: profile=True
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from libc.stdlib cimport free
 from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
@@ -142,8 +143,8 @@ cdef class MergedArchives:
             fg = self.archives[i]
             fg.set_start_ts(&start_ts)
             # TODO: error handling here
-            print cpcp.pmErrStr(fg.fetch())
-            print cpcp.pmtimevalToReal(&fg.timestamp)
+            # print cpcp.pmErrStr(fg.fetch())
+            # print cpcp.pmtimevalToReal(&fg.timestamp)
 
             heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
 
@@ -352,6 +353,9 @@ cdef class Metric:
     cdef unsigned int out_num
     cdef int out_status
 
+    def __str__(self):
+        return "Metric(max_size={}, num={}, vals={}, statuses={})".format(self.num_instances, self.out_num, self.get_values(), np.asarray(self.get_statuses()))
+
     cdef np.ndarray get_inst_codes(self):
         if self.indom == cpcp.PM_INDOM_NULL:
             # TODO: this emulates what puffypcp does
@@ -370,7 +374,11 @@ cdef class Metric:
         cdef object[:] view = inst_names
         cdef int i
         for i in range(self.out_num):
-            view[i] = <object>self.out_inst_names[i]
+            if self.out_inst_names[i] is NULL:
+                # TODO: what to do here?
+                view[i] = ""
+            else:
+                view[i] = <object>self.out_inst_names[i]
         return inst_names
 
     cdef int[:] get_statuses(self):

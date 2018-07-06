@@ -5,6 +5,7 @@ import itertools
 
 import numpy as np
 
+from supremm.plugin import NodeMetadata
 from supremm.rangechange import RangeChange
 from supremm.pcp_logmerge.pcp_logmerge import MergedArchives
 
@@ -12,9 +13,21 @@ from supremm.pcp_logmerge.pcp_logmerge import MergedArchives
 VERSION = "1.0.6"
 TIMESERIES_VERSION = 4
 
+EMPTY_DOUBLE_ARRAY = np.empty(0, dtype=np.float64)
+EMPTY_I64_ARRAY = np.empty(0, dtype=np.int64)
 
 def datetime_to_timestamp(dt):
     return (dt - datetime.datetime.utcfromtimestamp(0)).total_seconds()
+
+
+class NodeMeta(NodeMetadata):
+    """ container for achive metadata """
+    def __init__(self, nodename, nodeidx):
+        self._nodename = nodename
+        self._nodeidx = nodeidx
+
+    nodename = property(lambda self: self._nodename)
+    nodeindex = property(lambda self: self._nodeidx)
 
 
 class Summarize(object):
@@ -107,6 +120,7 @@ class Summarize(object):
         return output
 
     def process(self):
+        logging.info("Processing job %s", self.job)
         success = True
         self.nodes_processed = 0
         nodes_skipped = 0
@@ -134,6 +148,7 @@ class Summarize(object):
         return success
 
     def process_node(self, node_name, node_idx, archives):
+        logging.debug("Processing node %s (%s archives)", node_name, len(archives))
         start_archive_idx, _ = self.job.get_start_archive(node_name)
         start_ts = datetime_to_timestamp(self.job.start_datetime) if start_archive_idx is None else None
         _, end_archive_name = self.job.get_end_archive(node_name)
@@ -146,6 +161,8 @@ class Summarize(object):
 
         self.process_preprocs(node_name, node_idx, merged_archives)
         merged_archives.clear_metrics()
+
+        self.process_analytics(node_name, node_idx, merged_archives)
 
         return True
 
@@ -176,10 +193,31 @@ class Summarize(object):
                 break
 
         for preproc, _ in preprocs_used:
+            preproc.status = "complete"
             preproc.hostend()
 
     def process_analytics(self, node_name, node_idx, merged_archives):
-        pass
+        # TODO: RangeChange - modify to use dict
+        node_meta = NodeMeta(node_name, node_idx)
+        plugins_used = []
+        for plugin in self.alltimestamps:
+            metrics = register_plugin(plugin, merged_archives)
+            if metrics:
+                plugins_used.append((plugin, metrics))
+            else:
+                logging.debug(
+                    "Skipping %s (%s) for node %s, required metrics not found",
+                    type(plugin).__name__, plugin.name, node_name
+                )
+
+        plugin_status = {p[0]: False for p in plugins_used}  # "done" status for each plugin
+        for timestamp, metrics in merged_archives.iter_data():
+            process_entry_plugins(plugins_used, plugin_status, node_meta, timestamp, metrics)
+            if all(plugin_status.itervalues()):
+                break
+
+        for plugin, _ in plugins_used:
+            plugin.status = "complete"
 
 
 def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
@@ -214,6 +252,32 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
         if has_some_data:
             # preproc returns True if it wants more data, so set done to False
             preproc_status[preproc] = not preproc.process(timestamp, np.array(data), description)
+
+
+def process_entry_plugins(plugins, plugin_status, node_meta, timestamp, metrics):
+    for plugin, met_names in plugins:
+        if plugin_status[plugin]:
+            # plugin status is "done"
+            continue
+
+        data = []
+        description = []
+        has_some_data = False
+        for met_name in met_names:
+            met = metrics.get(met_name)
+            if met is not None:
+                has_some_data = True
+                vals, inst_codes, inst_names = met
+                data.append(vals)
+                # TODO: !! tolist() very bad, but some plugins expect a python list for now
+                description.append((inst_codes, inst_names.tolist()))
+            else:
+                # Keeps puffypcp behavior
+                data.append(EMPTY_DOUBLE_ARRAY)
+                description.append((EMPTY_I64_ARRAY, []))
+
+        if has_some_data:
+            plugin_status[plugin] = not plugin.process(node_meta, timestamp, data, description)
 
 
 def register_plugin(plugin, merged_archives):

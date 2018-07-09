@@ -235,6 +235,7 @@ def getoptions(has_mpi):
 
 
 def summarizejob(*args):
+    # return summarizejob_old(*args)
     return summarizejob_new(*args)
 
 

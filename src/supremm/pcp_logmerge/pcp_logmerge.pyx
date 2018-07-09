@@ -1,5 +1,6 @@
-# cython: profile=True
+# cython: profile=False
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
+cimport cython
 from libc.stdlib cimport free
 from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
 import heapq
@@ -49,11 +50,14 @@ cdef class MergedArchives:
     cdef object end_archive_name
     cdef double end_ts
 
+    cdef set active_metrics  # TODO: remove if there's a better solution
+
     def __cinit__(self, list archives, start_archive=None, start_timestamp=None, end_archive_name=None, end_timestamp=None):
         # TODO: error handling here
         cdef tuple all_archives = tuple(ArchiveFetchGroup(path) for path in archives)
         self.status_codes = np.array(tuple(fg.creation_status for fg in all_archives))
         self.archives = tuple(fg for fg in all_archives if fg.creation_status == 0)
+        self.active_metrics = set()
 
         self.start_archive = start_archive
         self.end_archive_name = end_archive_name
@@ -95,6 +99,8 @@ cdef class MergedArchives:
                     logging.warning("Unexpected error extending fetchgroup for archive %s: %s", arch_fg.archive_path, extend_errors)
                     return False  # Note in this case we will have "orphan" Metrics (registered but will never be used)
 
+                self.active_metrics.update(metrics)  # TODO: temporary
+
         else:
             for arch_fg in self.archives:
                 arch_fg.abort_pending_metrics()
@@ -115,12 +121,15 @@ cdef class MergedArchives:
         for i in range(len(success)):
             if success[i]:
                 successful_metrics.append(metrics[i])
+
+        self.active_metrics.update(successful_metrics)  # TODO: temporary
         return successful_metrics
 
     def clear_metrics(self):
-        cdef ArchiveFetchGroup fg
-        for fg in self.archives:
-            fg.clear_metrics()
+        self.active_metrics.clear()
+        # cdef ArchiveFetchGroup fg
+        # for fg in self.archives:
+        #     fg.clear_metrics()
 
     def iter_data(self):
         cdef ArchiveFetchGroup start_archive
@@ -162,9 +171,10 @@ cdef class MergedArchives:
             metrics = {}  # or clear? are things going to keep a reference to the yielded dict?
             for i in range(len(fg.metrics)):
                 metric = fg.metrics[i]
-                if metric.out_num > 0 and metric.out_status == 0:
+                if metric.out_num > 0 and metric.out_status == 0 and fg.metric_names[i] in self.active_metrics:
                     # TODO: do something when *all* metrics have errors?
-                    metrics[fg.metric_names[i]] = (metric.get_values(), metric.get_inst_codes(), metric.get_inst_names())
+                    metric.check_cached_length()
+                    metrics[fg.metric_names[i]] = metric.get_data()
 
             yield (timestamp, metrics)
 
@@ -338,6 +348,7 @@ cdef class ArchiveFetchGroup:
         return errors
 
 
+cdef np.ndarray NULL_INDOM_INST = np.full(1, -1, dtype=np.int32)
 
 cdef class Metric:
     cdef int num_instances
@@ -353,25 +364,51 @@ cdef class Metric:
     cdef unsigned int out_num
     cdef int out_status
 
+    cdef unsigned int last_len
+    cdef np.ndarray inst_codes_np
+
     def __str__(self):
         return "Metric(max_size={}, num={}, vals={}, statuses={})".format(self.num_instances, self.out_num, self.get_values(), np.asarray(self.get_statuses()))
 
+    cdef tuple get_data(self):
+        return self.get_values(), self.inst_codes_np, self.get_inst_names()
+
+
+    @cython.profile(False)
+    cdef void check_cached_length(self):
+        if self.out_num != self.last_len:
+            self._remake_numpy_arrays()
+            self.last_len = self.out_num
+
+    @cython.profile(False)
+    cdef inline void _remake_numpy_arrays(self):
+        cdef int[::1] inst_codes_view = <int[:self.out_num]>self.out_inst_codes
+        self.inst_codes_np = np.asarray(inst_codes_view, dtype=np.int32)
+
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.profile(False)
     cdef np.ndarray get_inst_codes(self):
         if self.indom == cpcp.PM_INDOM_NULL:
             # TODO: this emulates what puffypcp does
-            return np.full(1, -1, dtype=np.int32)
+            return NULL_INDOM_INST
+
         cdef np.ndarray inst_codes = np.empty(self.out_num, dtype=np.int32)
-        cdef int[:] view = inst_codes
+        cdef int[::1] view = inst_codes
         cdef int i
         for i in range(self.out_num):
             view[i] = self.out_inst_codes[i]
         return inst_codes
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.profile(False)
     cdef np.ndarray get_inst_names(self):
         if self.indom == cpcp.PM_INDOM_NULL:
             return EMPTY_STR_ARR
         cdef np.ndarray inst_names = np.empty(self.out_num, dtype=np.object_)
-        cdef object[:] view = inst_names
+        cdef object[::1] view = inst_names
         cdef int i
         for i in range(self.out_num):
             if self.out_inst_names[i] is NULL:
@@ -387,7 +424,9 @@ cdef class Metric:
         cdef int [:] view = <int[:self.out_num]>self.out_statuses
         return view
 
+    @cython.profile(False)
     cdef np.ndarray get_values(self):
+        # TODO: cache ndarray/memoryview and only make a new one if the out_num changes
         cdef np.ndarray val_arr
 
         # TODO: everything is converted to doubles to remain consistent with the current mechanism for now.
@@ -441,6 +480,9 @@ cdef class Metric:
         metric.out_values = <cpcp.pmAtomValue *>metric.pool.malloc(num_instances * sizeof(cpcp.pmAtomValue))
         metric.out_statuses = <int *>metric.pool.malloc(num_instances * sizeof(int))
 
+        metric.last_len = 0
+        metric.inst_codes_np = None
+
         metric.creation_status = cpcp.pmExtendFetchGroup_indom(
             fg,
             metric_name,
@@ -457,44 +499,65 @@ cdef class Metric:
         return metric
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_i32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef double[:] view = arr
+    cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <double>values[i].l
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_u32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef double[:] view = arr
+    cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <double>values[i].ul
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_i64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef double[:] view = arr
+    cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <double>values[i].ll
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_u64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef double[:] view = arr
+    cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <double>values[i].ull
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_float(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef double[:] view = arr
+    cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <double>values[i].f
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_double(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef double[:] view = arr
+    cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <double>values[i].d
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.profile(False)
 cdef _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
-    cdef object[:] view = arr
+    cdef object[::1] view = arr
     cdef unsigned int i
     for i in range(n):
         view[i] = <object>values[i].cp

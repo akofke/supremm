@@ -99,7 +99,7 @@ class Summarize(object):
         output['acct']['id'] = self.job.job_id
 
         if len(timeseries) > 0:
-            timeseries['hosts'] = dict((str(idx), name) for name, idx, _ in self.job.nodearchives())
+            timeseries['hosts'] = dict((str(nodedata.nodeindex), name) for name, nodedata in self.job._nodes.iteritems())
             timeseries['version'] = TIMESERIES_VERSION
             output['timeseries'] = timeseries
 
@@ -149,18 +149,20 @@ class Summarize(object):
 
     def process_node(self, node_name, node_idx, archives):
         logging.debug("Processing node %s (%s archives)", node_name, len(archives))
-        start_archive_idx, _ = self.job.get_start_archive(node_name)
-        start_ts = datetime_to_timestamp(self.job.start_datetime) if start_archive_idx is None else None
-        _, end_archive_name = self.job.get_end_archive(node_name)
-        end_ts = datetime_to_timestamp(self.job.end_datetime) if end_archive_name is None else None
-        merged_archives = MergedArchives(archives, start_archive_idx, start_ts, end_archive_name, end_ts)
+        merged_archives = MergedArchives(
+            archives,
+            self.job.get_start_archive(node_name),
+            datetime_to_timestamp(self.job.start_datetime),
+            self.job.get_end_archive(node_name),
+            datetime_to_timestamp(self.job.end_datetime)
+        )
 
         if np.all(merged_archives.get_status_codes() != 0):
             # None of the archives could be opened, indicate failure for this node
             return False
 
         self.process_preprocs(node_name, node_idx, merged_archives)
-        merged_archives.clear_metrics()
+        merged_archives.clear_metrics_and_reset()
 
         self.process_analytics(node_name, node_idx, merged_archives)
 
@@ -250,8 +252,8 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
                 description.append({})
 
         if has_some_data:
-            # preproc returns True if it wants more data, so set done to False
-            preproc_status[preproc] = not preproc.process(timestamp, np.array(data), description)
+            # Set "done" to True iff the preproc returns False
+            preproc_status[preproc] = preproc.process(timestamp, np.array(data), description) is False
 
 
 def process_entry_plugins(plugins, plugin_status, node_meta, timestamp, metrics):
@@ -277,7 +279,8 @@ def process_entry_plugins(plugins, plugin_status, node_meta, timestamp, metrics)
                 description.append((EMPTY_I64_ARRAY, []))
 
         if has_some_data:
-            plugin_status[plugin] = not plugin.process(node_meta, timestamp, data, description)
+            # Set "done" to true iff the plugin returns False
+            plugin_status[plugin] = plugin.process(node_meta, timestamp, data, description) is False
 
 
 def register_plugin(plugin, merged_archives):

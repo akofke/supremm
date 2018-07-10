@@ -270,16 +270,16 @@ class Job(object):
 
     def get_start_archive(self, node_name):
         start_archive = "job-{}-begin".format(self.job_id)
-        for idx, archive_path in enumerate(self._nodes[node_name].rawarchives):
+        for archive_path in self._nodes[node_name].rawarchives:
             filename = os.path.basename(archive_path)
             if filename.startswith(start_archive):
-                return idx, archive_path
-        return None, None
+                return archive_path
+        return None
 
     def get_end_archive(self, node_name):
         end_archive = "job-{}-end".format(self.job_id)
-        for idx, archive_path in enumerate(self._nodes[node_name].rawarchives):
+        for archive_path in self._nodes[node_name].rawarchives:
             filename = os.path.basename(archive_path)
             if filename.startswith(end_archive):
-                return idx, archive_path
-        return None, None
+                return archive_path
+        return None

@@ -29,6 +29,8 @@ cdef extern from "pcp/pmapi.h":
     int PM_TYPE_HIGHRES_EVENT
     int PM_TYPE_UNKNOWN
 
+    int PM_ERR_EOL
+
     int PM_INDOM_NULL
 
     const int PM_TZ_MAXLEN
@@ -78,6 +80,8 @@ cdef extern from "pcp/pmapi.h":
 
     int pmGetArchiveLabel(pmLogLabel *lp)
 
+    int pmGetArchiveEnd(timeval *tvp)
+
     int pmLookupName(int numpmid, char **namelist, pmID *pmidlist)
 
     int pmLookupDesc(pmID pmid, pmDesc *desc)
@@ -109,3 +113,7 @@ cdef extern from "pcp/pmapi.h":
     int pmDestroyFetchGroup(pmFG pmfg)
 
     # int pmClearFetchGroup(pmFG pmfg)
+
+
+cdef extern from "clear_fetchgroup.c":
+    int pmClearFetchGroup(pmFG fg)

@@ -1,4 +1,6 @@
 # cython: profile=False
+import math
+
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 cimport cython
 from libc.stdlib cimport free
@@ -43,28 +45,38 @@ cdef class Pool:
 
 
 cdef class MergedArchives:
-    cdef tuple archives
+    cdef dict archives
     cdef np.ndarray status_codes
     cdef object start_archive
     cdef double start_ts
-    cdef object end_archive_name
+    cdef object end_archive
     cdef double end_ts
+    cdef bint at_start
 
-    cdef set active_metrics  # TODO: remove if there's a better solution
-
-    def __cinit__(self, list archives, start_archive=None, start_timestamp=None, end_archive_name=None, end_timestamp=None):
-        # TODO: error handling here
+    def __cinit__(self, list archives, start_archive, start_timestamp, end_archive, end_timestamp):
         cdef tuple all_archives = tuple(ArchiveFetchGroup(path) for path in archives)
+        cdef ArchiveFetchGroup fg
         self.status_codes = np.array(tuple(fg.creation_status for fg in all_archives))
-        self.archives = tuple(fg for fg in all_archives if fg.creation_status == 0)
-        self.active_metrics = set()
 
-        self.start_archive = start_archive
-        self.end_archive_name = end_archive_name
-        if start_archive is None:
-            self.start_ts = start_timestamp
-        if end_archive_name is None:
+        # map each successful archive path to its fetchgroup
+        self.archives = {fg.archive_path: fg for fg in all_archives if fg.creation_status == 0}
+
+        self.start_archive = start_archive if start_archive in self.archives else None
+        self.start_ts = start_timestamp
+        self.end_archive = end_archive if end_archive in self.archives else None
+        cdef ArchiveFetchGroup end_fg
+        cdef cpcp.timeval tv
+        if self.end_archive is not None:
+            end_fg = self.archives[self.end_archive]
+            cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(end_fg.fg))
+            cpcp.pmGetArchiveEnd(&tv)
+            # TODO: this emulates buggy code from the old adjust_job_start_end. Fix later
+            self.end_ts = math.ceil(cpcp.pmtimevalToReal(&tv))
+        else:
+            # This will already be per-second granularity
             self.end_ts = end_timestamp
+
+        self.at_start = False
 
     cpdef np.ndarray get_status_codes(self):
         return self.status_codes
@@ -84,7 +96,7 @@ cdef class MergedArchives:
         cdef Py_ssize_t i_arch
         cdef Py_ssize_t i_met
         cdef ArchiveFetchGroup arch_fg
-        for i_arch, arch_fg in enumerate(self.archives):
+        for i_arch, arch_fg in enumerate(self.archives.itervalues()):
             for i_met, metric in enumerate(metrics):
                 err = arch_fg.maybe_add_metric(metric)
                 if err == 0:
@@ -93,16 +105,14 @@ cdef class MergedArchives:
         success = np.all(np.any(metric_success, axis=1))
         cdef np.ndarray extend_errors
         if success:
-            for arch_fg in self.archives:
+            for arch_fg in self.archives.itervalues():
                 extend_errors = arch_fg.finalize_pending_metrics()
                 if np.any(extend_errors != 0):
                     logging.warning("Unexpected error extending fetchgroup for archive %s: %s", arch_fg.archive_path, extend_errors)
                     return False  # Note in this case we will have "orphan" Metrics (registered but will never be used)
 
-                self.active_metrics.update(metrics)  # TODO: temporary
-
         else:
-            for arch_fg in self.archives:
+            for arch_fg in self.archives.itervalues():
                 arch_fg.abort_pending_metrics()
 
         return success
@@ -113,7 +123,7 @@ cdef class MergedArchives:
         cdef ArchiveFetchGroup fg
         cdef int sts
         cdef int i
-        for fg in self.archives:
+        for fg in self.archives.itervalues():
             for i, metric in enumerate(metrics):
                 sts = fg.add_metric(metric)
                 if sts == 0:
@@ -122,39 +132,48 @@ cdef class MergedArchives:
             if success[i]:
                 successful_metrics.append(metrics[i])
 
-        self.active_metrics.update(successful_metrics)  # TODO: temporary
         return successful_metrics
 
-    def clear_metrics(self):
-        self.active_metrics.clear()
-        # cdef ArchiveFetchGroup fg
-        # for fg in self.archives:
-        #     fg.clear_metrics()
+    def clear_metrics_and_reset(self):
+        cdef ArchiveFetchGroup fg
+        for fg in self.archives.itervalues():
+            fg.clear_metrics()
+        self.reset_to_start()
 
-    def iter_data(self):
+    cpdef void reset_to_start(self):
+        if self.at_start:
+            return
         cdef ArchiveFetchGroup start_archive
         cdef cpcp.timeval start_ts
         if self.start_archive is not None:
             # If the start archive was given, grab the precise start time of that archive
             # and use it as the start time for all archives
             start_archive = self.archives[self.start_archive]
+            # TODO: this emulates buggy behavior
             start_ts = start_archive.get_start_from_loglabel()
+            cpcp.pmtimevalFromReal(math.floor(cpcp.pmtimevalToReal(&start_ts)), &start_ts)
         else:
             # otherwise fall back to the less precise job start time from the database (only second precision)
             cpcp.pmtimevalFromReal(self.start_ts, &start_ts)
 
+        cdef Py_ssize_t i
+        cdef ArchiveFetchGroup fg
+        for fg in self.archives.itervalues():
+            fg.set_start_ts(&start_ts)
+
+        self.at_start = True
+
+
+    def iter_data(self):
+        self.reset_to_start()
+        self.at_start = False
 
         cdef list archive_queue = []
 
         cdef Py_ssize_t i
         cdef ArchiveFetchGroup fg
-        for i in range(len(self.archives)):
-            fg = self.archives[i]
-            fg.set_start_ts(&start_ts)
-            # TODO: error handling here
-            # print cpcp.pmErrStr(fg.fetch())
-            # print cpcp.pmtimevalToReal(&fg.timestamp)
-
+        for fg in self.archives.itervalues():
+            fg.fetch()
             heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
 
         cdef double timestamp
@@ -163,15 +182,11 @@ cdef class MergedArchives:
         cdef Metric metric
         while archive_queue:  # while there are archives in the queue
             timestamp, fg = heapq.heappop(archive_queue)  # get the fetchgroup with the lowest timestamp
-            if self.end_archive_name is None and timestamp > self.end_ts:
-                # If the end archive was not given, stop once we're past the coarse job end time
-                break
-            # print "{} at {}".format(fg.archive_path, timestamp)
 
-            metrics = {}  # or clear? are things going to keep a reference to the yielded dict?
+            metrics.clear()  # Clear since all its data will become invalid on next fetch anyways
             for i in range(len(fg.metrics)):
                 metric = fg.metrics[i]
-                if metric.out_num > 0 and metric.out_status == 0 and fg.metric_names[i] in self.active_metrics:
+                if metric.out_num > 0 and metric.out_status == 0:
                     # TODO: do something when *all* metrics have errors?
                     metric.check_cached_length()
                     metrics[fg.metric_names[i]] = metric.get_data()
@@ -179,18 +194,15 @@ cdef class MergedArchives:
             yield (timestamp, metrics)
 
             fetch_err = fg.fetch()
-            if fetch_err >= 0:
+            if fetch_err >= 0 and cpcp.pmtimevalToReal(&fg.timestamp) <= self.end_ts:
+                # If the fetch was successful and the next timestamp is not past the
+                # job end timestamp, add it back to the queue. If the archive hits EOL
+                # or its next data point is past the job end, don't add it back. Eventually
+                # this will cause the queue to be empty and processing is finished
                 heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
-            elif fetch_err == c_pmapi.PM_ERR_EOL:
-                # print "{} EOL".format(fg.archive_path)
-                if fg.archive_path == self.end_archive_name:
-                    # If the end archive was given, once that archive ends the iteration is done
-                    # (i.e. don't keep processing the daily archive)
-                    break
-            else:
-                # TODO: fetch should only return other error codes for "severe fetch errors"
-                pass
-
+            elif fetch_err < 0 and fetch_err != cpcp.PM_ERR_EOL:
+                # This shouldn't really happen for archive context
+                logging.error("Unexpected severe fetch error for %s", fg.archive_path)
 
 
 cdef class ArchiveFetchGroup:
@@ -203,6 +215,9 @@ cdef class ArchiveFetchGroup:
     cdef cpcp.timeval timestamp
     cdef list pending_metrics
 
+    # Map indom id to a dict of instance id -> instance name (as python string)
+    cdef dict indom_names
+
     def __cinit__(self, archive_path):
         self.creation_status = cpcp.pmCreateFetchGroup(&self.fg, c_pmapi.PM_CONTEXT_ARCHIVE, archive_path)
         self.archive_path = archive_path
@@ -210,6 +225,7 @@ cdef class ArchiveFetchGroup:
         self.metrics = []
         self.metric_names = []
         self.pending_metrics = []
+        self.indom_names = {cpcp.PM_INDOM_NULL: {}}
 
         if not self.creation_status < 0:
             cpcp.pmExtendFetchGroup_timestamp(self.fg, &self.timestamp)
@@ -218,8 +234,11 @@ cdef class ArchiveFetchGroup:
         if self.fg != <cpcp.pmFG>NULL:
             cpcp.pmDestroyFetchGroup(self.fg)
 
+    def __str__(self):
+        return "FetchGroup(archive={}, status={}, num={}, ts={})".format(self.archive_path, self.creation_status, len(self.metrics), cpcp.pmtimevalToReal(&self.timestamp))
 
     cdef cpcp.timeval get_start_from_loglabel(self):
+        # TODO: cache timeval
         cdef cpcp.pmLogLabel label
         cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(self.fg))
         cpcp.pmGetArchiveLabel(&label)
@@ -242,6 +261,8 @@ cdef class ArchiveFetchGroup:
         cdef int num_instances
         cdef int *instlist
         cdef char **namelist
+        cdef int i
+        cdef dict instance_names
         if indom == cpcp.PM_INDOM_NULL:
             return 1
         if indom in self.indom_sizes:
@@ -250,8 +271,14 @@ cdef class ArchiveFetchGroup:
             num_instances = cpcp.pmGetInDomArchive(indom, &instlist, &namelist)
             if num_instances < 0:
                 return num_instances  # no allocation happens if error
-            elif num_instances > 1:
+            elif num_instances >= 1:
                 # no allocation if num_instances is less than one, but otherwise we need to free
+                if indom not in self.indom_names:
+                    instance_names = {}
+                    for i in range(num_instances):
+                        instance_names[instlist[i]] = namelist[i]  # copies char * to python str
+                    self.indom_names[indom] = instance_names
+
                 free(instlist)
                 free(namelist)
             self.indom_sizes[indom] = num_instances
@@ -260,11 +287,12 @@ cdef class ArchiveFetchGroup:
 
     cdef int clear_metrics(self):
         # TODO: pmClearFetchGroup is not available in 3.12
-        pass
-        # cdef int sts = cpcp.pmClearFetchGroup(self.fg)
-        # self.metrics = []
-        # self.metric_names = []
-        # return sts
+        # pass
+        cdef int sts = cpcp.pmClearFetchGroup(self.fg)
+        cpcp.pmExtendFetchGroup_timestamp(self.fg, &self.timestamp)
+        self.metrics = []
+        self.metric_names = []
+        return sts
 
     cdef int add_metric(self, metric_name):
         # Note about metric_name string: when cython implicitly converts a python string to a char *, the pointer
@@ -289,7 +317,7 @@ cdef class ArchiveFetchGroup:
         if num_instances < 0:
             return num_instances
 
-        cdef Metric metric = Metric.create(self.fg, name, num_instances, desc.type, desc.indom)
+        cdef Metric metric = Metric.create(self.fg, name, num_instances, desc.type, desc.indom, self.indom_names.get(desc.indom, {}))
         if metric.creation_status < 0:
             return metric.creation_status  # error extending, return the error code and the Metric will go out of scope now
         else:
@@ -336,7 +364,7 @@ cdef class ArchiveFetchGroup:
         cdef np.ndarray errors = np.zeros(len(self.pending_metrics))
         cdef Py_ssize_t i
         for i, (metric_name, num_instances, val_type, indom) in enumerate(self.pending_metrics):
-            metric = Metric.create(self.fg, metric_name, num_instances, val_type, indom)
+            metric = Metric.create(self.fg, metric_name, num_instances, val_type, indom, self.indom_names.get(indom, {}))
             errors[i] = metric.creation_status
             if metric.creation_status == 0:
                 self.metrics.append(metric)
@@ -366,12 +394,17 @@ cdef class Metric:
 
     cdef unsigned int last_len
     cdef np.ndarray inst_codes_np
+    cdef np.ndarray inst_names_np
+    cdef object[::1] inst_names_view
+    cdef np.ndarray values_np
+
+    cdef dict inst_names
 
     def __str__(self):
-        return "Metric(max_size={}, num={}, vals={}, statuses={})".format(self.num_instances, self.out_num, self.get_values(), np.asarray(self.get_statuses()))
+        return "Metric(max_size={}, num={})".format(self.num_instances, self.out_num)
 
     cdef tuple get_data(self):
-        return self.get_values(), self.inst_codes_np, self.get_inst_names()
+        return self.get_values(), self.get_inst_codes(), self.get_inst_names()
 
 
     @cython.profile(False)
@@ -381,42 +414,55 @@ cdef class Metric:
             self.last_len = self.out_num
 
     @cython.profile(False)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef inline void _remake_numpy_arrays(self):
         cdef int[::1] inst_codes_view = <int[:self.out_num]>self.out_inst_codes
         self.inst_codes_np = np.asarray(inst_codes_view, dtype=np.int32)
 
+        self.inst_names_np = np.empty(self.out_num, dtype=np.object_)
+        self.inst_names_view = self.inst_names_np
+
+        if self.val_type == cpcp.PM_TYPE_STRING:
+            self.values_np = np.empty(self.out_num, dtype=np.object_)
+        else:
+            # TODO: Change this when we aren't converting everything to double
+            self.values_np = np.empty(self.out_num, dtype=np.double)
+
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.profile(False)
-    cdef np.ndarray get_inst_codes(self):
+    cdef inline np.ndarray get_inst_codes(self):
         if self.indom == cpcp.PM_INDOM_NULL:
             # TODO: this emulates what puffypcp does
             return NULL_INDOM_INST
-
-        cdef np.ndarray inst_codes = np.empty(self.out_num, dtype=np.int32)
-        cdef int[::1] view = inst_codes
-        cdef int i
-        for i in range(self.out_num):
-            view[i] = self.out_inst_codes[i]
-        return inst_codes
+        else:
+            return self.inst_codes_np
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.profile(False)
-    cdef np.ndarray get_inst_names(self):
+    cdef inline np.ndarray get_inst_names(self):
         if self.indom == cpcp.PM_INDOM_NULL:
             return EMPTY_STR_ARR
-        cdef np.ndarray inst_names = np.empty(self.out_num, dtype=np.object_)
-        cdef object[::1] view = inst_names
         cdef int i
+        cdef int inst_code
         for i in range(self.out_num):
+            # inst_code = self.out_inst_codes[i]
+            # if inst_code not in self.inst_names:
+            #     self.inst_names_view[i] = ""
+            # else:
+            #     self.inst_names_view[i] = self.inst_names[inst_code]
+
             if self.out_inst_names[i] is NULL:
                 # TODO: what to do here?
-                view[i] = ""
+                self.inst_names_view[i] = ""
             else:
-                view[i] = <object>self.out_inst_names[i]
-        return inst_names
+                # This copies the char * to a new python string
+                # TODO: keep a dict of codes -> names (as preallocated python strings) and avoid making new ones?
+                self.inst_names_view[i] = <object>self.out_inst_names[i]
+        return self.inst_names_np
 
     cdef int[:] get_statuses(self):
         if self.out_num == 0:
@@ -425,50 +471,38 @@ cdef class Metric:
         return view
 
     @cython.profile(False)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef np.ndarray get_values(self):
-        # TODO: cache ndarray/memoryview and only make a new one if the out_num changes
-        cdef np.ndarray val_arr
 
         # TODO: everything is converted to doubles to remain consistent with the current mechanism for now.
         # As a separate change, fix this to return arrays of the correct integer types
         if self.val_type == cpcp.PM_TYPE_32:
-            # val_arr = np.empty(self.out_num, dtype=np.int32)
-            val_arr = np.empty(self.out_num, dtype=np.double)
-            _fill_i32(self.out_num, self.out_values, val_arr)
+            _fill_i32(self.out_num, self.out_values, self.values_np)
 
         elif self.val_type == cpcp.PM_TYPE_U32:
-            # val_arr = np.empty(self.out_num, dtype=np.uint32)
-            val_arr = np.empty(self.out_num, dtype=np.double)
-            _fill_u32(self.out_num, self.out_values, val_arr)
+            _fill_u32(self.out_num, self.out_values, self.values_np)
 
         elif self.val_type == cpcp.PM_TYPE_64:
-            # val_arr = np.empty(self.out_num, dtype=np.int64)
-            val_arr = np.empty(self.out_num, dtype=np.double)
-            _fill_i64(self.out_num, self.out_values, val_arr)
+            _fill_i64(self.out_num, self.out_values, self.values_np)
 
         elif self.val_type == cpcp.PM_TYPE_U64:
-            # val_arr = np.empty(self.out_num, dtype=np.uint64)
-            val_arr = np.empty(self.out_num, dtype=np.double)
-            _fill_u64(self.out_num, self.out_values, val_arr)
+            _fill_u64(self.out_num, self.out_values, self.values_np)
 
         elif self.val_type == cpcp.PM_TYPE_FLOAT:
-            # val_arr = np.empty(self.out_num, dtype=np.single)
-            val_arr = np.empty(self.out_num, dtype=np.double)
-            _fill_float(self.out_num, self.out_values, val_arr)
+            _fill_float(self.out_num, self.out_values, self.values_np)
 
         elif self.val_type == cpcp.PM_TYPE_DOUBLE:
-            val_arr = np.empty(self.out_num, dtype=np.double)
-            _fill_double(self.out_num, self.out_values, val_arr)
+            _fill_double(self.out_num, self.out_values, self.values_np)
 
         elif self.val_type == cpcp.PM_TYPE_STRING:
-            val_arr = np.empty(self.out_num, dtype=np.object_)
-            _fill_string(self.out_num, self.out_values, val_arr)
+            _fill_string(self.out_num, self.out_values, self.values_np)
 
-        return val_arr
+        return self.values_np
 
 
     @staticmethod
-    cdef create(cpcp.pmFG fg, char *metric_name, int num_instances, int val_type, cpcp.pmInDom indom):
+    cdef create(cpcp.pmFG fg, char *metric_name, int num_instances, int val_type, cpcp.pmInDom indom, dict instance_names):
         cdef Metric metric = Metric.__new__(Metric)
         metric.num_instances = num_instances
         metric.val_type = val_type
@@ -482,12 +516,17 @@ cdef class Metric:
 
         metric.last_len = 0
         metric.inst_codes_np = None
+        metric.inst_names_np = None
+        metric.values_np = None
+
+        metric.inst_names = instance_names
 
         metric.creation_status = cpcp.pmExtendFetchGroup_indom(
             fg,
             metric_name,
             "instant",  # Do not attempt to do rate-conversion or convert units/scale
             metric.out_inst_codes,
+            # NULL,
             metric.out_inst_names,
             metric.out_values,
             val_type,
@@ -502,7 +541,7 @@ cdef class Metric:
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_i32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_i32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
@@ -511,7 +550,7 @@ cdef _fill_i32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_u32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_u32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
@@ -520,7 +559,7 @@ cdef _fill_u32(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_i64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_i64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
@@ -529,7 +568,7 @@ cdef _fill_i64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_u64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_u64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
@@ -538,7 +577,7 @@ cdef _fill_u64(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_float(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_float(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
@@ -547,7 +586,7 @@ cdef _fill_float(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_double(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_double(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef double[::1] view = arr
     cdef unsigned int i
     for i in range(n):
@@ -556,7 +595,7 @@ cdef _fill_double(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.profile(False)
-cdef _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
+cdef inline _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray arr):
     cdef object[::1] view = arr
     cdef unsigned int i
     for i in range(n):

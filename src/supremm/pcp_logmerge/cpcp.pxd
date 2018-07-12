@@ -30,6 +30,7 @@ cdef extern from "pcp/pmapi.h":
     int PM_TYPE_UNKNOWN
 
     int PM_ERR_EOL
+    int PM_ERR_TOOBIG
 
     int PM_INDOM_NULL
 
@@ -117,3 +118,6 @@ cdef extern from "pcp/pmapi.h":
 
 cdef extern from "clear_fetchgroup.c":
     int pmClearFetchGroup(pmFG fg)
+
+    void patchDiscrete(pmFG pmfg)
+    void unPatchDiscrete(pmFG pmfg)

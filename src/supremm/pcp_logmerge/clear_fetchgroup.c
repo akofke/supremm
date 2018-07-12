@@ -222,3 +222,57 @@ pmClearFetchGroup(pmFG pmfg)
 
     return pmfg_clear_profile(pmfg);
 }
+
+void patchDiscrete(pmFG pmfg) {
+	pmFGI item;
+
+	for (item = pmfg->items; item; item = item->next) {
+		switch (item->type) {
+			case pmfg_timestamp:
+			break;
+
+			case pmfg_item:
+			if (item->u.item.metric_desc.sem == PM_SEM_DISCRETE)
+				item->u.item.metric_desc.sem = -4;
+			break;
+
+			case pmfg_indom:
+			if (item->u.indom.metric_desc.sem == PM_SEM_DISCRETE)
+				item->u.item.metric_desc.sem = -4;
+			break;
+
+			case pmfg_event:
+			break;
+
+			default:
+		assert(0);	/* can't happen */
+		}
+	}
+}
+
+void unPatchDiscrete(pmFG pmfg) {
+	pmFGI item;
+	
+	for (item = pmfg->items; item; item = item->next) {
+		switch (item->type) {
+			case pmfg_timestamp:
+			break;
+
+			case pmfg_item:
+			if (item->u.item.metric_desc.sem == -4)
+				item->u.item.metric_desc.sem = PM_SEM_DISCRETE;
+			break;
+
+			case pmfg_indom:
+			if (item->u.indom.metric_desc.sem == -4)
+				item->u.item.metric_desc.sem = PM_SEM_DISCRETE;
+			break;
+
+			case pmfg_event:
+			break;
+
+			default:
+		assert(0);	/* can't happen */
+		}
+	}
+}

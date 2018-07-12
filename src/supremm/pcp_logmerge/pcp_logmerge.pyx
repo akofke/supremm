@@ -4,7 +4,9 @@ import math
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 cimport cython
 from libc.stdlib cimport free
+from libc.limits cimport USHRT_MAX
 from libc.stdint cimport int32_t, uint32_t, int64_t, uint64_t
+
 import heapq
 import logging
 
@@ -174,12 +176,18 @@ cdef class MergedArchives:
         cdef ArchiveFetchGroup fg
         for fg in self.archives.itervalues():
             fg.fetch()
-            heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
+            if cpcp.pmtimevalToReal(&fg.timestamp) <= self.end_ts:
+                # in rare cases (very short jobs), there may not be a daily archive data point
+                # within the job time window. Since the timestamp isn't checked when it's extracted
+                # from the queue, we have to check when adding here (as well as subsequent adds)
+                # to make sure no timestamps outside the range enter the queue.
+                heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
 
         cdef double timestamp
         cdef int fetch_err
         cdef dict metrics = {}
         cdef Metric metric
+        cdef tuple metric_data
         while archive_queue:  # while there are archives in the queue
             timestamp, fg = heapq.heappop(archive_queue)  # get the fetchgroup with the lowest timestamp
 
@@ -189,11 +197,20 @@ cdef class MergedArchives:
                 if metric.out_num > 0 and metric.out_status == 0:
                     # TODO: do something when *all* metrics have errors?
                     metric.check_cached_length()
-                    metrics[fg.metric_names[i]] = metric.get_data()
+                    metric_data = metric.get_data()
+                    # If metric_data is None there are missing instance names, so for now
+                    # just skip the metric for this timestamp
+                    if metric_data is not None:
+                        metrics[fg.metric_names[i]] = metric_data
+                    else:
+                        print "{}".format(timestamp)
 
             yield (timestamp, metrics)
 
+            cpcp.patchDiscrete(fg.fg)
             fetch_err = fg.fetch()
+            cpcp.unPatchDiscrete(fg.fg)
+
             if fetch_err >= 0 and cpcp.pmtimevalToReal(&fg.timestamp) <= self.end_ts:
                 # If the fetch was successful and the next timestamp is not past the
                 # job end timestamp, add it back to the queue. If the archive hits EOL
@@ -401,10 +418,15 @@ cdef class Metric:
     cdef dict inst_names
 
     def __str__(self):
-        return "Metric(max_size={}, num={})".format(self.num_instances, self.out_num)
+        return "Metric(max_size={}, num={}, status={})".format(self.num_instances, self.out_num, self.out_status)
 
     cdef tuple get_data(self):
-        return self.get_values(), self.get_inst_codes(), self.get_inst_names()
+        cdef np.ndarray inst_names
+        inst_names = self.get_inst_names()
+        if inst_names is not None:
+            return self.get_values(), self.get_inst_codes(), inst_names
+        else:
+            return None
 
 
     @cython.profile(False)
@@ -456,8 +478,10 @@ cdef class Metric:
             #     self.inst_names_view[i] = self.inst_names[inst_code]
 
             if self.out_inst_names[i] is NULL:
-                # TODO: what to do here?
-                self.inst_names_view[i] = ""
+                # If we're missing an instance name, skip this metric for this timestamp.
+                # This is simpler than compacting the arrays to remove missing instances.
+                # TODO: possibly find a way to salvage data
+                return None
             else:
                 # This copies the char * to a new python string
                 # TODO: keep a dict of codes -> names (as preallocated python strings) and avoid making new ones?

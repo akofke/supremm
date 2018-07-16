@@ -195,7 +195,7 @@ cdef class MergedArchives:
             for i in range(len(fg.metrics)):
                 metric = fg.metrics[i]
                 if metric.out_status == cpcp.PM_ERR_TOOBIG:
-                    logging.error("TOO BIG!!! %s %s, timestamp %s, archive %s", metric, fg.metric_names[i], timestamp, fg.archive_path)
+                    logging.warning("Instance metadata inconsistency encountered, skipping %s, timestamp %s, archive %s", metric, timestamp, fg.archive_path)
                 if metric.out_num > 0 and metric.out_status == 0:
                     # TODO: do something when *all* metrics have errors?
                     metric.check_cached_length()
@@ -419,7 +419,7 @@ cdef class Metric:
     cdef np.ndarray values_np
 
     def __str__(self):
-        return "Metric(max_size={}, num={}, status={})".format(self.num_instances, self.out_num, self.out_status)
+        return "Metric({}, max_size={}, num={}, status={})".format(self.metric_name, self.num_instances, self.out_num, self.out_status)
 
     cdef tuple get_data(self):
         cdef np.ndarray inst_names
@@ -534,10 +534,12 @@ cdef class Metric:
         cdef Metric metric = Metric.__new__(Metric)
 
 
-        if metric_name.startswith("hotproc") or metric_name.startswith("cgroup"):
+        if metric_name.startswith("cgroup"):
             # print "Using max-length buffer for metric {}".format(metric_name)
-            metric.num_instances = USHRT_MAX
+            metric.num_instances = num_instances + 5
             metric.proc_workaround = True
+        # elif metric_name.startswith("hotproc"):
+        #     # TODO
         else:
             metric.num_instances = num_instances
             metric.proc_workaround = False

@@ -643,8 +643,26 @@ cdef inline _fill_string(unsigned int n, cpcp.pmAtomValue *values, np.ndarray ar
 def get_stuff2():
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161230.00.10")
     # cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/dev/shm/supremm-adkofke/mae/972366/cpn-p26-07")
-    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/user/adkofke/pcplogs/20161229.00.10")
-    fg.set_start(1)
+    cdef ArchiveFetchGroup fg = ArchiveFetchGroup("/gpfs/projects/ccr/pcp/pcp-logs/srv-k07-14.cbls.ccr.buffalo.edu/2018/07/16/20180716.00.10")
+    cdef int *instlist
+    cdef char **namelist
+    cdef int num_instances
+    cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(fg.fg))
+    cdef char *name = "hotproc.psinfo.pid"
+    cdef cpcp.pmID pmid
+    cpcp.pmLookupName(1, &name, &pmid)
+    cdef cpcp.pmDesc desc
+    cpcp.pmLookupDesc(pmid, &desc)
+
+    num_instances = cpcp.pmGetInDomArchive(desc.indom, &instlist, &namelist)
+
+    print num_instances
+    cdef int i
+    print num_instances
+    for i in range(num_instances):
+        print "inst: {}, name: {}".format(instlist[i], namelist[i])
+
+    # fg.set_start(1)
     # cdef int s1 = fg.add_metric("hotproc.io.write_bytes")
     # print cpcp.pmErrStr(s1)
     #
@@ -657,8 +675,8 @@ def get_stuff2():
     # cdef int s3 = fg.add_metric("nfs4.client.reqs")
     # print cpcp.pmErrStr(s3)
 
-    cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
-    print cpcp.pmErrStr(s4)
+    # cdef int s4 = fg.add_metric("hotproc.psinfo.environ")
+    # print cpcp.pmErrStr(s4)
     #
     # cdef int s5 = fg.add_metric("cgroup.cpuset.cpus")
     # print cpcp.pmErrStr(s5)
@@ -666,28 +684,28 @@ def get_stuff2():
     # s5 = fg.add_metric("nvidia.memtotal")
     # print cpcp.pmErrStr(s5)
 
-    cdef int fetch_sts
-
-    cdef Metric m
-    cdef unsigned int n
-    while True:
-        fetch_sts = fg.fetch()
-        if fetch_sts < 0:
-            print "Fetch: {}".format(cpcp.pmErrStr(fetch_sts))
-            break
-
-        print "Timestamp {}".format(cpcp.pmtimevalToReal(&fg.timestamp))
-
-        for m, mname in zip(fg.metrics, fg.metric_names):
-            n = m.out_num
-            if n > 0:
-                print "{}: Num: {}, status: {}, error codes: {} <{}>, data: {}".format(
-                    mname, n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), cpcp.pmErrStr(m.get_statuses()[0]), m.get_values()
-                )
-            else:
-                print "{}: No instances".format(mname)
-
-        print "===="
+    # cdef int fetch_sts
+    #
+    # cdef Metric m
+    # cdef unsigned int n
+    # while True:
+    #     fetch_sts = fg.fetch()
+    #     if fetch_sts < 0:
+    #         print "Fetch: {}".format(cpcp.pmErrStr(fetch_sts))
+    #         break
+    #
+    #     print "Timestamp {}".format(cpcp.pmtimevalToReal(&fg.timestamp))
+    #
+    #     for m, mname in zip(fg.metrics, fg.metric_names):
+    #         n = m.out_num
+    #         if n > 0:
+    #             print "{}: Num: {}, status: {}, error codes: {} <{}>, data: {}".format(
+    #                 mname, n, cpcp.pmErrStr(m.out_status), np.asarray(m.get_statuses()), cpcp.pmErrStr(m.get_statuses()[0]), m.get_values()
+    #             )
+    #         else:
+    #             print "{}: No instances".format(mname)
+    #
+    #     print "===="
 
 
 

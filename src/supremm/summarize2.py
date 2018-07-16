@@ -245,7 +245,7 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
                 #        ['value3', 3]], dtype=object)
                 data.append(np.column_stack((vals, inst_codes)))
 
-                description.append({inst_codes[i]: inst_names[i] for i in xrange(len(inst_names))})
+                description.append({inst_codes[i]: inst_names[i] for i in xrange(len(inst_names)) if inst_names[i] != ""})
             else:
                 # Metric is not present at this timestamp, use a placeholder
                 data.append([])

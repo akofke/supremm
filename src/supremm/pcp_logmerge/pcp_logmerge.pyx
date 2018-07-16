@@ -194,6 +194,8 @@ cdef class MergedArchives:
             metrics.clear()  # Clear since all its data will become invalid on next fetch anyways
             for i in range(len(fg.metrics)):
                 metric = fg.metrics[i]
+                if metric.out_status == cpcp.PM_ERR_TOOBIG:
+                    logging.error("TOO BIG!!! %s %s, timestamp %s, archive %s", metric, fg.metric_names[i], timestamp, fg.archive_path)
                 if metric.out_num > 0 and metric.out_status == 0:
                     # TODO: do something when *all* metrics have errors?
                     metric.check_cached_length()
@@ -202,8 +204,6 @@ cdef class MergedArchives:
                     # just skip the metric for this timestamp
                     if metric_data is not None:
                         metrics[fg.metric_names[i]] = metric_data
-                    else:
-                        print "{}".format(timestamp)
 
             yield (timestamp, metrics)
 
@@ -334,7 +334,7 @@ cdef class ArchiveFetchGroup:
         if num_instances < 0:
             return num_instances
 
-        cdef Metric metric = Metric.create(self.fg, name, num_instances, desc.type, desc.indom, self.indom_names.get(desc.indom, {}))
+        cdef Metric metric = Metric.create(self.fg, name, num_instances, desc.type, desc.indom)
         if metric.creation_status < 0:
             return metric.creation_status  # error extending, return the error code and the Metric will go out of scope now
         else:
@@ -381,7 +381,8 @@ cdef class ArchiveFetchGroup:
         cdef np.ndarray errors = np.zeros(len(self.pending_metrics))
         cdef Py_ssize_t i
         for i, (metric_name, num_instances, val_type, indom) in enumerate(self.pending_metrics):
-            metric = Metric.create(self.fg, metric_name, num_instances, val_type, indom, self.indom_names.get(indom, {}))
+
+            metric = Metric.create(self.fg, metric_name, num_instances, val_type, indom)
             errors[i] = metric.creation_status
             if metric.creation_status == 0:
                 self.metrics.append(metric)
@@ -396,6 +397,8 @@ cdef class ArchiveFetchGroup:
 cdef np.ndarray NULL_INDOM_INST = np.full(1, -1, dtype=np.int32)
 
 cdef class Metric:
+    cdef bint proc_workaround
+    cdef object metric_name
     cdef int num_instances
     cdef int val_type
     cdef cpcp.pmInDom indom
@@ -414,8 +417,6 @@ cdef class Metric:
     cdef np.ndarray inst_names_np
     cdef object[::1] inst_names_view
     cdef np.ndarray values_np
-
-    cdef dict inst_names
 
     def __str__(self):
         return "Metric(max_size={}, num={}, status={})".format(self.num_instances, self.out_num, self.out_status)
@@ -481,7 +482,10 @@ cdef class Metric:
                 # If we're missing an instance name, skip this metric for this timestamp.
                 # This is simpler than compacting the arrays to remove missing instances.
                 # TODO: possibly find a way to salvage data
-                return None
+                if self.proc_workaround:
+                    self.inst_names_view[i] = ""
+                else:
+                    return None
             else:
                 # This copies the char * to a new python string
                 # TODO: keep a dict of codes -> names (as preallocated python strings) and avoid making new ones?
@@ -526,28 +530,38 @@ cdef class Metric:
 
 
     @staticmethod
-    cdef create(cpcp.pmFG fg, char *metric_name, int num_instances, int val_type, cpcp.pmInDom indom, dict instance_names):
+    cdef create(cpcp.pmFG fg, object metric_name, int num_instances, int val_type, cpcp.pmInDom indom):
         cdef Metric metric = Metric.__new__(Metric)
-        metric.num_instances = num_instances
+
+
+        if metric_name.startswith("hotproc") or metric_name.startswith("cgroup"):
+            # print "Using max-length buffer for metric {}".format(metric_name)
+            metric.num_instances = USHRT_MAX
+            metric.proc_workaround = True
+        else:
+            metric.num_instances = num_instances
+            metric.proc_workaround = False
+
+
+        metric.metric_name = metric_name
         metric.val_type = val_type
         metric.indom = indom
         metric.pool = Pool()
 
-        metric.out_inst_codes = <int *>metric.pool.malloc(num_instances * sizeof(int))
-        metric.out_inst_names = <char **>metric.pool.malloc(num_instances * sizeof(char *))
-        metric.out_values = <cpcp.pmAtomValue *>metric.pool.malloc(num_instances * sizeof(cpcp.pmAtomValue))
-        metric.out_statuses = <int *>metric.pool.malloc(num_instances * sizeof(int))
+        metric.out_inst_codes = <int *>metric.pool.malloc(metric.num_instances * sizeof(int))
+        metric.out_inst_names = <char **>metric.pool.malloc(metric.num_instances * sizeof(char *))
+        metric.out_values = <cpcp.pmAtomValue *>metric.pool.malloc(metric.num_instances * sizeof(cpcp.pmAtomValue))
+        metric.out_statuses = <int *>metric.pool.malloc(metric.num_instances * sizeof(int))
 
         metric.last_len = 0
         metric.inst_codes_np = None
         metric.inst_names_np = None
         metric.values_np = None
 
-        metric.inst_names = instance_names
-
+        cdef char *name = metric_name
         metric.creation_status = cpcp.pmExtendFetchGroup_indom(
             fg,
-            metric_name,
+            name,
             "instant",  # Do not attempt to do rate-conversion or convert units/scale
             metric.out_inst_codes,
             # NULL,
@@ -555,7 +569,7 @@ cdef class Metric:
             metric.out_values,
             val_type,
             metric.out_statuses,
-            num_instances,
+            metric.num_instances,
             &metric.out_num,
             &metric.out_status
         )

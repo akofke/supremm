@@ -222,6 +222,7 @@ cdef class MergedArchives:
                 logging.error("Unexpected severe fetch error for %s", fg.archive_path)
 
 
+@cython.final
 cdef class ArchiveFetchGroup:
     cdef archive_path
     cdef readonly int creation_status
@@ -396,6 +397,7 @@ cdef class ArchiveFetchGroup:
 
 cdef np.ndarray NULL_INDOM_INST = np.full(1, -1, dtype=np.int32)
 
+@cython.final
 cdef class Metric:
     cdef bint proc_workaround
     cdef object metric_name

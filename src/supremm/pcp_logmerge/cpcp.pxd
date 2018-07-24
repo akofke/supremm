@@ -29,6 +29,9 @@ cdef extern from "pcp/pmapi.h":
     int PM_TYPE_HIGHRES_EVENT
     int PM_TYPE_UNKNOWN
 
+    int PM_MODE_FORW
+    int PM_MODE_BACK
+
     int PM_ERR_EOL
     int PM_ERR_TOOBIG
 

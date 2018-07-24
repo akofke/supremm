@@ -55,6 +55,9 @@ cdef class MergedArchives:
     cdef double end_ts
     cdef bint at_start
 
+    # used for firstlast, maps a plugin key to its required metrics
+    cdef dict plugin_metrics
+
     def __cinit__(self, list archives, start_archive, start_timestamp, end_archive, end_timestamp):
         cdef tuple all_archives = tuple(ArchiveFetchGroup(path) for path in archives)
         cdef ArchiveFetchGroup fg
@@ -79,11 +82,12 @@ cdef class MergedArchives:
             self.end_ts = end_timestamp
 
         self.at_start = False
+        self.plugin_metrics = {}
 
     cpdef np.ndarray get_status_codes(self):
         return self.status_codes
 
-    cpdef add_metrics_required(self, list metrics):
+    cpdef add_metrics_required(self, list metrics, plugin=None):
         """
         Attempts to add the given list of metrics as a whole to the archive fetchgroups.
         Returns true if every metric was successfully added to at least one archive fetchgroup
@@ -112,6 +116,8 @@ cdef class MergedArchives:
                 if np.any(extend_errors != 0):
                     logging.warning("Unexpected error extending fetchgroup for archive %s: %s", arch_fg.archive_path, extend_errors)
                     return False  # Note in this case we will have "orphan" Metrics (registered but will never be used)
+            if plugin is not None:
+                self.plugin_metrics[plugin] = set(metrics)
 
         else:
             for arch_fg in self.archives.itervalues():
@@ -165,14 +171,12 @@ cdef class MergedArchives:
 
         self.at_start = True
 
-
-    def iter_data(self):
+    cdef list _init_archive_queue(self):
         self.reset_to_start()
         self.at_start = False
 
         cdef list archive_queue = []
 
-        cdef Py_ssize_t i
         cdef ArchiveFetchGroup fg
         for fg in self.archives.itervalues():
             fg.fetch()
@@ -183,7 +187,14 @@ cdef class MergedArchives:
                 # to make sure no timestamps outside the range enter the queue.
                 heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
 
+        return archive_queue
+
+    def iter_data(self):
+        cdef list archive_queue = self._init_archive_queue()
+        cdef Py_ssize_t i
+        cdef ArchiveFetchGroup fg
         cdef double timestamp
+
         cdef int fetch_err
         cdef dict metrics = {}
         cdef Metric metric
@@ -220,6 +231,185 @@ cdef class MergedArchives:
             elif fetch_err < 0 and fetch_err != cpcp.PM_ERR_EOL:
                 # This shouldn't really happen for archive context
                 logging.error("Unexpected severe fetch error for %s", fg.archive_path)
+
+    def get_firstlast(self, rangechange_config=None):
+        cdef dict range_changers = None
+        if rangechange_config is not None:
+            range_changers = {metric: RangeChange(conf["range"]) for metric, conf in rangechange_config.iteritems()}
+
+        first_data, archive_queue = self._get_first(range_changers)
+
+        if range_changers is None:
+            last_data = self._get_last_rewind()
+        else:
+            last_data = self._get_last_passthrough(range_changers, archive_queue)
+
+        return first_data, last_data
+
+    cdef tuple _get_first(self, range_changers):
+        cdef bint has_rangechange = range_changers is not None
+        cdef bint all_done = False
+        cdef dict first_data = {}
+        cdef np.ndarray values, inst_codes, inst_names
+        cdef dict plugin_status = {plugin: False for plugin in self.plugin_metrics.iterkeys()}
+        cdef set pending_done = set()
+        cdef Metric metric
+        cdef RangeChange rc
+        cdef double timestamp
+        cdef ArchiveFetchGroup fg
+
+        cdef list archive_queue = self._init_archive_queue()
+
+        while not all_done and archive_queue:
+            timestamp, fg = heapq.heappop(archive_queue)
+
+            for metric in fg.metrics:
+                if metric.out_status == cpcp.PM_ERR_TOOBIG:
+                    logging.warning("Instance metadata inconsistency encountered, skipping %s, timestamp %s, archive %s", metric, timestamp, fg.archive_path)
+                if metric.out_num > 0 and metric.out_status == 0 and metric.metric_name not in first_data:
+                    metric.check_cached_length()
+                    metric_data = metric.get_data()
+                    if metric_data is not None:
+                        values, inst_codes, inst_names = metric_data
+                        # need to copy the numpy arrays since we want to keep the data at this timestamp.
+                        # If the same metric is fetched at the next timestamp, the underlying buffer of the original
+                        # array will be overwritten and the data will be invalid
+                        copied_data = (timestamp, values.copy(), inst_codes.copy(), inst_names.copy())
+
+                        if has_rangechange and metric.metric_name in range_changers:
+                            rc = range_changers[metric.metric_name]
+                            rc.normalise_data(copied_data[1])
+
+                        first_data[metric.metric_name] = copied_data
+                        for plugin, done in plugin_status.iteritems():
+                            if not done and metric.metric_name in self.plugin_metrics[plugin]:
+                                pending_done.add(plugin)
+
+            for plugin in pending_done:
+                plugin_status[plugin] = True
+                for met_name in self.plugin_metrics[plugin]:
+                    if met_name not in first_data:
+                        first_data[met_name] = None
+
+            if all(plugin_status.itervalues()):
+                break
+
+            cpcp.patchDiscrete(fg.fg)
+            fetch_err = fg.fetch()
+            cpcp.unPatchDiscrete(fg.fg)
+
+            if fetch_err >= 0 and cpcp.pmtimevalToReal(&fg.timestamp) <= self.end_ts:
+                heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
+            elif fetch_err < 0 and fetch_err != cpcp.PM_ERR_EOL:
+                logging.error("Unexpected severe fetch error for %s", fg.archive_path)
+
+        return first_data, archive_queue
+
+    cdef dict _get_last_passthrough(self, range_changers, list archive_queue):
+        # Don't reset archives, keep going from where we left off
+
+        cdef double timestamp
+        cdef ArchiveFetchGroup fg
+        cdef np.ndarray values, inst_codes, inst_names, inst_codes_copy
+        cdef Metric metric
+        cdef dict last_data = {}
+        cdef tuple metric_data
+        cdef RangeChange rc
+
+        while archive_queue:
+            timestamp, fg = heapq.heappop(archive_queue)
+
+            for metric in fg.metrics:
+                if metric.out_status == cpcp.PM_ERR_TOOBIG:
+                    logging.warning("Instance metadata inconsistency encountered, skipping %s, timestamp %s, archive %s", metric, timestamp, fg.archive_path)
+
+                if metric.out_num > 0 and metric.out_status == 0:
+                    metric.check_cached_length()
+                    metric_data = metric.get_data()
+                    if metric_data is not None:
+                        values, inst_codes, inst_names = metric_data
+                        # need to copy inst codes since it is a direct view of the fg buffer
+                        # and will be overwritten as soon as we call fetch. The others were copied
+                        # in some form from the original buffer.
+                        inst_codes_copy = inst_codes.copy()
+
+                        if metric.metric_name in range_changers:
+                            rc = range_changers[metric.metric_name]
+                            rc.normalise_data(values)
+
+                        last_data[metric.metric_name] = (timestamp, values, inst_codes_copy, inst_names)
+
+            cpcp.patchDiscrete(fg.fg)
+            fetch_err = fg.fetch()
+            cpcp.unPatchDiscrete(fg.fg)
+
+            if fetch_err >= 0 and cpcp.pmtimevalToReal(&fg.timestamp) <= self.end_ts:
+                heapq.heappush(archive_queue, (cpcp.pmtimevalToReal(&fg.timestamp), fg))
+            elif fetch_err < 0 and fetch_err != cpcp.PM_ERR_EOL:
+                logging.error("Unexpected severe fetch error for %s", fg.archive_path)
+
+        return last_data
+
+    cdef dict _get_last_rewind(self):
+        cdef cpcp.timeval end_tv
+        cpcp.pmtimevalFromReal(self.end_ts, &end_tv)
+        cdef ArchiveFetchGroup fg
+        cdef list archive_queue = []
+        for fg in self.archives.itervalues():
+            cpcp.pmUseContext(cpcp.pmGetFetchGroupContext(fg.fg))
+            cpcp.pmSetMode(cpcp.PM_MODE_BACK, &end_tv, 0)
+
+            fg.fetch()
+
+            if cpcp.pmtimevalToReal(&fg.timestamp) >= self.start_ts:
+                # Push the negative timestamp onto the min heap so the *latest* timestamp will be first in the queue
+                heapq.heappush(archive_queue, (-cpcp.pmtimevalToReal(&fg.timestamp), fg))
+
+        cdef bint all_done = False
+        cdef dict last_data = {}
+        cdef np.ndarray values, inst_codes, inst_names
+        cdef dict plugin_status = {plugin: False for plugin in self.plugin_metrics.iterkeys()}
+        cdef set pending_done = set()
+        cdef Metric metric
+        cdef double timestamp
+
+        while not all_done and archive_queue:
+            timestamp, fg = heapq.heappop(archive_queue)
+            timestamp *= -1
+
+            for metric in fg.metrics:
+                if metric.out_status == cpcp.PM_ERR_TOOBIG:
+                    logging.warning("Instance metadata inconsistency encountered, skipping %s, timestamp %s, archive %s", metric, timestamp, fg.archive_path)
+                if metric.out_num > 0 and metric.out_status == 0 and metric.metric_name not in last_data:
+                    metric.check_cached_length()
+                    metric_data = metric.get_data()
+                    if metric_data is not None:
+                        values, inst_codes, inst_names = metric_data
+                        copied_data = (timestamp, values.copy(), inst_codes.copy(), inst_names.copy())
+                        last_data[metric.metric_name] = copied_data
+                        for plugin, done in plugin_status.iteritems():
+                            if not done and metric.metric_name in self.plugin_metrics[plugin]:
+                                pending_done.add(plugin)
+
+            for plugin in pending_done:
+                plugin_status[plugin] = True
+                for met_name in self.plugin_metrics[plugin]:
+                    if met_name not in last_data:
+                        last_data[met_name] = None
+
+            if all(plugin_status.itervalues()):
+                break
+
+            cpcp.patchDiscrete(fg.fg)
+            fetch_err = fg.fetch()
+            cpcp.unPatchDiscrete(fg.fg)
+
+            if fetch_err >= 0 and cpcp.pmtimevalToReal(&fg.timestamp) <= self.end_ts:
+                heapq.heappush(archive_queue, (-cpcp.pmtimevalToReal(&fg.timestamp), fg))
+            elif fetch_err < 0 and fetch_err != cpcp.PM_ERR_EOL:
+                logging.error("Unexpected severe fetch error for %s", fg.archive_path)
+
+        return last_data
 
 
 @cython.final
@@ -578,6 +768,29 @@ cdef class Metric:
             &metric.out_status
         )
         return metric
+
+
+cdef class RangeChange:
+    cdef int bits  # number of bits in the original counter
+    cdef object range
+    cdef np.ndarray accumulator
+    cdef np.ndarray last
+
+    def __cinit__(self, int bits):
+        self.bits = bits
+        self.range = np.uint64(1 << bits)
+        self.accumulator = None
+        self.last = None
+
+    cdef normalise_data(self, np.ndarray metric_values):
+        if self.accumulator == None:
+            self.accumulator = np.copy(metric_values)
+            self.last = np.copy(metric_values)
+        else:
+            # TODO: if necessary, use manual copying with memoryviews for better performance
+            self.accumulator += (metric_values - self.last) % self.range
+            np.copyto(self.last, metric_values)
+            np.copyto(metric_values, self.accumulator)
 
 
 @cython.boundscheck(False)

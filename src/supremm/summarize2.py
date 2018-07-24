@@ -43,7 +43,10 @@ class Summarize(object):
         self.fail_fast = fail_fast
         self._good_enough = True
 
-        self.rangechange = RangeChange(config)
+        try:
+            self.rangechange_config = config.getsection("normalization")
+        except KeyError:
+            self.rangechange_config = None
 
     def adderror(self, category, errormsg):
         """ All errors reported with this function show up in the job summary """
@@ -165,6 +168,9 @@ class Summarize(object):
         merged_archives.clear_metrics_and_reset()
 
         self.process_analytics(node_name, node_idx, merged_archives)
+        merged_archives.clear_metrics_and_reset()
+
+        self.process_firstlast(node_name, node_idx, merged_archives)
 
         return True
 
@@ -219,6 +225,63 @@ class Summarize(object):
                 break
 
         for plugin, _ in plugins_used:
+            plugin.status = "complete"
+
+    def process_firstlast(self, node_name, node_idx, merged_archives):
+        node_meta = NodeMeta(node_name, node_idx)
+        plugins_used = []
+        for plugin in self.firstlast:
+            metrics = register_plugin(plugin, merged_archives, firstlast=True)
+            if metrics:
+                plugins_used.append((plugin, metrics))
+            else:
+                logging.debug(
+                    "Skipping %s (%s) for node %s, required metrics not found",
+                    type(plugin).__name__, plugin.name, node_name
+                )
+
+        first_entry, last_entry = merged_archives.get_firstlast(self.rangechange_config)
+
+        for plugin, met_names in plugins_used:
+            first_data = []
+            last_data = []
+            first_desc = []
+            last_desc = []
+            has_first = False
+            has_last = False
+            ts_f = None
+            ts_l = None
+            for met_name in met_names:
+                met_f = first_entry.get(met_name)
+                met_l = last_entry.get(met_name)
+                # TODO: only if both exist?
+                if met_f is not None and met_l is not None:
+                    has_first = True
+                    ts_f, vals_f, codes_f, names_f = met_f
+                    first_data.append(vals_f)
+                    first_desc.append((codes_f, names_f.tolist()))
+                else:
+                    first_data.append(EMPTY_DOUBLE_ARRAY)
+                    first_desc.append((EMPTY_I64_ARRAY, []))
+
+                if met_l is not None:
+                    has_last = True
+                    ts_l, vals_l, codes_l, names_l = met_l
+                    last_data.append(vals_l)
+                    last_desc.append((codes_l, names_l.tolist()))
+                else:
+                    last_data.append(EMPTY_DOUBLE_ARRAY)
+                    last_data.append((EMPTY_I64_ARRAY, []))
+
+            if ts_f is not None and ts_l is not None and ts_f == ts_l:
+                continue  # TODO: log debug
+
+            if has_first:
+                plugin.process(node_meta, ts_f, first_data, first_desc)
+
+            if has_last:
+                plugin.process(node_meta, ts_l, last_data, last_desc)
+
             plugin.status = "complete"
 
 
@@ -283,7 +346,7 @@ def process_entry_plugins(plugins, plugin_status, node_meta, timestamp, metrics)
             plugin_status[plugin] = plugin.process(node_meta, timestamp, data, description) is False
 
 
-def register_plugin(plugin, merged_archives):
+def register_plugin(plugin, merged_archives, firstlast=False):
     """
     Attemps to register the plugin's required and optional metrics with the merged archive.
     Returns the list of metrics ultimately added if it was successful (this includes optional metrics),
@@ -294,12 +357,12 @@ def register_plugin(plugin, merged_archives):
     # otherwise is an IndexError
     if plugin.requiredMetrics and isinstance(plugin.requiredMetrics[0], list):
         for alternative in plugin.requiredMetrics:
-            success = merged_archives.add_metrics_required(alternative)
+            success = merged_archives.add_metrics_required(alternative, plugin=plugin if firstlast else None)
             if success:
                 metrics.extend(alternative)
                 break
     else:
-        success = merged_archives.add_metrics_required(plugin.requiredMetrics)
+        success = merged_archives.add_metrics_required(plugin.requiredMetrics, plugin=plugin if firstlast else None)
         if success:
             metrics.extend(plugin.requiredMetrics)
 

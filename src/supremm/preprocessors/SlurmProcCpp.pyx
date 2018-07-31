@@ -1,8 +1,14 @@
+# distutils: language = c++
+# cython: profile=False
 import re
 from collections import Counter
 import itertools
 
+from libcpp.string cimport string
+from libcpp.map cimport map
+from libcpp.vector cimport vector
 from libc.stdint cimport int64_t, int32_t
+from libc.string cimport strcmp
 from cpython.ref cimport PyObject
 cimport cython
 
@@ -45,7 +51,7 @@ cdef class SlurmProcCpp:
         self._status = value
 
     @staticmethod
-    cdef inline bint slurmcgroupparser(str s):
+    cdef inline bint slurmcgroupparser(bytes s):
         """ Parse linux cgroup string for slurm-specific settings and extract
             the UID and jobid of each job
         """
@@ -63,6 +69,7 @@ cdef class SlurmProcCpp:
     cdef object cgrouppath
     cdef object expected_cgroup
     cdef object job_username
+    cdef const char *c_job_username
 
     cdef set cpus_allowed
     cdef set cgroup_cpuset
@@ -73,6 +80,7 @@ cdef class SlurmProcCpp:
         self.cgrouppath = "/slurm/uid_" + str(job.acct['uid']) + "/job_" + job.job_id
         self.expected_cgroup = "cpuset:" + self.cgrouppath
         self.job_username = job.acct['user']
+        self.c_job_username = self.job_username
 
         self.cpus_allowed = None
         self.cgroup_cpuset = None
@@ -98,6 +106,15 @@ cdef class SlurmProcCpp:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     def process(self, double timestamp, np.ndarray data, np.ndarray inst_ids, np.ndarray inst_names):
+        if len(data) > 3 and self.cgroup_cpuset is None:
+            for cpuset, cgroup in zip(data[3], inst_names[3]):
+                if cgroup == self.cgrouppath:
+                    self.cgroup_cpuset = parsecpusallowed(cpuset)
+                    break
+
+        if len(data[1]) == 0:
+            return True
+
         # TODO: doesn't even need to be a map? just list of commands
         # cdef map[int32_t, char *] constrained_procs
         # cdef map[int32_t, char *] unconstrained_procs
@@ -105,23 +122,28 @@ cdef class SlurmProcCpp:
         cdef list unconstrained_commands = []
         cdef list cgroupedprocs = []
 
-        cdef int64_t[:] user_pid_indices = np.nonzero(data[1] == self.job_username)[0]
-        cdef int64_t i, idx
+        # cdef int64_t[:] user_pid_indices = np.nonzero(data[1] == self.job_username)[0]
+        cdef bytes[::1] usernames_view = data[1]
+        cdef vector[int64_t] user_pid_indices = get_user_pid_indices(self.c_job_username, usernames_view)
+
+        cdef int64_t idx
         cdef int32_t pid
-        cdef str[:] proc_names = inst_names[0]
-        cdef str[:] proc_cgroups = data[2]
+        cdef bytes[:] proc_names = inst_names[0]
+        cdef bytes[:] proc_cgroups = data[2]
         cdef int32_t[:] pids = inst_ids[0]
-        cdef str s, command
-        for i in range(user_pid_indices.size):
-            idx = user_pid_indices[i]
+        cdef bytes s, command
+        cdef char *proc_name
+        for idx in user_pid_indices:
+            # idx = user_pid_indices[i]
             pid = pids[idx]
+            # proc_name = proc_names[idx]
 
 
             if proc_names[idx] == "":
                 self.logerror("missing process name for pid {}".format(inst_ids[0][idx]))
 
             s = proc_names[idx]
-            command = s[s.find(" ") + 1:]
+            command = get_command(s)
 
 
             if self.expected_cgroup in proc_cgroups[idx]:
@@ -136,12 +158,6 @@ cdef class SlurmProcCpp:
                     # unconstrained_procs[pid] = command
                     unconstrained_commands.append(command)
 
-        if len(data) > 3 and self.cgroup_cpuset is None:
-            for cpuset, cgroup in zip(data[3], inst_names[3]):
-                if cgroup == self.cgrouppath:
-                    self.cgroup_cpuset = parsecpusallowed(cpuset)
-                    break
-
         if self.cpus_allowed is None:
             allcores = set()
             for cpuset in cgroupedprocs:
@@ -149,13 +165,17 @@ cdef class SlurmProcCpp:
             if len(allcores) > 0:
                 self.cpus_allowed = allcores
 
+        self.update_counts(constrained_commands, unconstrained_commands)
+
+        return True
+
+    cdef void update_counts(self, list constrained_commands, list unconstrained_commands):
         for procname in constrained_commands:#constrained_procs:
             self.output['procDump']['constrained'][procname] += 1
 
         for procname in unconstrained_commands:
             self.output['procDump']['unconstrained'][procname] += 1
 
-        return True
 
     def hostend(self):
 
@@ -196,3 +216,18 @@ cdef class SlurmProcCpp:
             i += 1
 
         return {'procDump': result}
+
+cdef inline bytes get_command(bytes s):
+    return s[s.find(" ") + 1:]
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef inline vector[int64_t] get_user_pid_indices(const char *job_username, bytes[::1] usernames_view):
+    cdef int64_t i
+    cdef vector[int64_t] user_pid_indices
+    cdef char *username
+    for i in range(usernames_view.size):
+        username = usernames_view[i]
+        if strcmp(job_username, username) == 0:
+            user_pid_indices.push_back(i)
+    return user_pid_indices

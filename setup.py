@@ -78,9 +78,11 @@ setup(
             "supremm.pcp_logmerge.pcp_logmerge",
             ["src/supremm/pcp_logmerge/pcp_logmerge.pyx"],
             libraries=["pcp"],
-            include_dirs=["/data/ccrstaff/adkofke/local/include", numpy.get_include()],
-            library_dirs=["/data/ccrstaff/adkofke/local/lib"]
+            include_dirs=[numpy.get_include()]
+            # include_dirs=["/data/ccrstaff/adkofke/local/include", numpy.get_include()],
+            # library_dirs=["/data/ccrstaff/adkofke/local/lib"]
         ),
+        Extension("supremm.preprocessors.SlurmProcCpp", ["src/supremm/preprocessors/SlurmProcCpp.pyx"], include_dirs=[numpy.get_include()])
     ], annotate=True)
 )
 

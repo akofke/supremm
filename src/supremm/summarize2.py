@@ -291,6 +291,7 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
             continue
 
         data = []
+        inst_ids = []
         description = []
         has_some_data = False
         for req in required_metrics:
@@ -298,25 +299,35 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
             if met is not None:
                 has_some_data = True
                 vals, inst_codes, inst_names = met
-                # TODO: check status for individual instances and use a placeholder empty array?
 
-                # TODO: change the api and do something more sane here
-                # This keeps compatibility with the current format of passing (inst value, inst id) pairs
-                # column_stack creates an array like
-                # array([['value1', 1],
-                #        ['value2', 2],
-                #        ['value3', 3]], dtype=object)
-                data.append(np.column_stack((vals, inst_codes)))
+                data.append(vals)
+                inst_ids.append(inst_codes)
+                description.append(inst_names)
 
-                description.append({inst_codes[i]: inst_names[i] for i in xrange(len(inst_names)) if inst_names[i] != ""})
+                # # TODO: check status for individual instances and use a placeholder empty array?
+                #
+                # # TODO: change the api and do something more sane here
+                # # This keeps compatibility with the current format of passing (inst value, inst id) pairs
+                # # column_stack creates an array like
+                # # array([['value1', 1],
+                # #        ['value2', 2],
+                # #        ['value3', 3]], dtype=object)
+                # stacked_data = np.column_stack((vals, inst_codes))
+                # data.append(stacked_data)
+                #
+                # # SlurmProc has a performance issue when the keys of the description dict are numpy int32 objects
+                # # instead of python integers, causing slow lookups. Since the column stack already converts the
+                # # instance codes to python ints, grab those here for the dict keys.
+                # description.append({stacked_data[i, 1]: inst_names[i] for i in xrange(len(inst_names)) if inst_names[i] != ""})
             else:
                 # Metric is not present at this timestamp, use a placeholder
                 data.append([])
-                description.append({})
+                description.append([])
 
         if has_some_data:
             # Set "done" to True iff the preproc returns False
-            preproc_status[preproc] = preproc.process(timestamp, np.array(data), description) is False
+            # preproc_status[preproc] = preproc.process(timestamp, np.array(data), description) is False
+            preproc_status[preproc] = preproc.process(timestamp, np.array(data), np.array(inst_ids), np.array(description)) is False
 
 
 def process_entry_plugins(plugins, plugin_status, node_meta, timestamp, metrics):

@@ -35,8 +35,6 @@ cdef extern from "pcp/pmapi.h":
     int PM_ERR_EOL
     int PM_ERR_TOOBIG
 
-    int PM_INDOM_NULL
-
     const int PM_TZ_MAXLEN
     const int PM_LOG_MAXHOSTLEN
     ctypedef struct pmLogLabel:
@@ -48,6 +46,8 @@ cdef extern from "pcp/pmapi.h":
 
     ctypedef unsigned int pmID
     ctypedef unsigned int pmInDom
+
+    pmInDom PM_INDOM_NULL
 
     ctypedef struct pmUnits:
         pass

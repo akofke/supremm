@@ -23,13 +23,13 @@ class PerfEvent(PreProcessor):
     def hoststart(self, hostname):
         pass
 
-    def process(self, timestamp, data, description):
+    def process(self, timestamp, data, inst_ids, inst_names):
 
         if self.perfactive == False:
             return False
 
-        if len(data) == 1 and data[0][:, 0].size > 0:
-            self.perfactive = data[0][0, 0] != 0
+        if len(data) == 1 and data[0].size > 0:
+            self.perfactive = data[0][0] != 0
             return self.perfactive
 
         return True

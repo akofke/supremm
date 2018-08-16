@@ -30,7 +30,7 @@ def loadplugins(plugindir=None, namespace="plugins"):
         m = getattr(m1, namespace)
         m = getattr(m, x)
         c = getattr(m, x)
-        if issubclass(c, Plugin) or issubclass(c, PreProcessor):
+        if issubclass(c, Plugin) or issubclass(c, PreProcessor) or c.__name__ == "SlurmProcCpp":
             analytics.append(c)
         else:
             del m1
@@ -148,7 +148,7 @@ class PreProcessor(object):
         pass
 
     @abstractmethod
-    def process(self, timestamp, data, description):
+    def process(self, timestamp, data, inst_ids, inst_names):
         """ Called by the framework for all datapoints collected for the host
             referenced in the preceeding call to hoststart. It a host has no data
             then this will not be called.

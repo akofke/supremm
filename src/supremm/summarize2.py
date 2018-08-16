@@ -15,6 +15,7 @@ TIMESERIES_VERSION = 4
 
 EMPTY_DOUBLE_ARRAY = np.empty(0, dtype=np.float64)
 EMPTY_I64_ARRAY = np.empty(0, dtype=np.int64)
+EMPTY_OBJ_ARRAY = np.empty(0, dtype=object)
 
 def datetime_to_timestamp(dt):
     return (dt - datetime.datetime.utcfromtimestamp(0)).total_seconds()
@@ -321,8 +322,9 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
                 # description.append({stacked_data[i, 1]: inst_names[i] for i in xrange(len(inst_names)) if inst_names[i] != ""})
             else:
                 # Metric is not present at this timestamp, use a placeholder
-                data.append([])
-                description.append([])
+                data.append(EMPTY_DOUBLE_ARRAY)
+                inst_ids.append(EMPTY_I64_ARRAY)
+                description.append(EMPTY_OBJ_ARRAY)
 
         if has_some_data:
             # Set "done" to True iff the preproc returns False

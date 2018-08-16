@@ -25,13 +25,13 @@ class HardwareInventory(PreProcessor):
     def hoststart(self, hostname):
         self.hostname = hostname
 
-    def process(self, timestamp, data, description):
+    def process(self, timestamp, data, inst_ids, inst_names):
 
-        if len(data) == 1 and data[0][:, 0].size > 0:
-            if data[0][0, 1] == -1:
-                self.corecount = data[0][0, 0]
+        if len(data) == 1 and data[0].size > 0:
+            if inst_ids[0][0] == -1:
+                self.corecount = data[0][0]
             else:
-                self.corecount = data[0][:, 0].size
+                self.corecount = data[0].size
             # Have sufficient information, therefore return False to prevent
             # any further callbacks
             return False

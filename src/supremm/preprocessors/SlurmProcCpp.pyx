@@ -112,7 +112,7 @@ cdef class SlurmProcCpp:
                     self.cgroup_cpuset = parsecpusallowed(cpuset)
                     break
 
-        if len(data[1]) == 0:
+        if len(data) < 3 or len(data[0]) == 0 or len(data[1]) == 0 or len(data[2]) == 0:
             return True
 
         # TODO: doesn't even need to be a map? just list of commands

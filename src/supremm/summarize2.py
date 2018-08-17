@@ -14,7 +14,7 @@ VERSION = "1.0.6"
 TIMESERIES_VERSION = 4
 
 EMPTY_DOUBLE_ARRAY = np.empty(0, dtype=np.float64)
-EMPTY_I64_ARRAY = np.empty(0, dtype=np.int64)
+EMPTY_I32_ARRAY = np.empty(0, dtype=np.int32)
 EMPTY_OBJ_ARRAY = np.empty(0, dtype=object)
 
 def datetime_to_timestamp(dt):
@@ -263,7 +263,7 @@ class Summarize(object):
                     first_desc.append((codes_f, names_f.tolist()))
                 else:
                     first_data.append(EMPTY_DOUBLE_ARRAY)
-                    first_desc.append((EMPTY_I64_ARRAY, []))
+                    first_desc.append((EMPTY_I32_ARRAY, []))
 
                 if met_l is not None:
                     has_last = True
@@ -272,7 +272,7 @@ class Summarize(object):
                     last_desc.append((codes_l, names_l.tolist()))
                 else:
                     last_data.append(EMPTY_DOUBLE_ARRAY)
-                    last_data.append((EMPTY_I64_ARRAY, []))
+                    last_data.append((EMPTY_I32_ARRAY, []))
 
             if ts_f is not None and ts_l is not None and ts_f == ts_l:
                 continue  # TODO: log debug
@@ -323,7 +323,7 @@ def process_entry_preprocs(preprocs, preproc_status, timestamp, metrics):
             else:
                 # Metric is not present at this timestamp, use a placeholder
                 data.append(EMPTY_DOUBLE_ARRAY)
-                inst_ids.append(EMPTY_I64_ARRAY)
+                inst_ids.append(EMPTY_I32_ARRAY)
                 description.append(EMPTY_OBJ_ARRAY)
 
         if has_some_data:
@@ -352,7 +352,7 @@ def process_entry_plugins(plugins, plugin_status, node_meta, timestamp, metrics)
             else:
                 # Keeps puffypcp behavior
                 data.append(EMPTY_DOUBLE_ARRAY)
-                description.append((EMPTY_I64_ARRAY, []))
+                description.append((EMPTY_I32_ARRAY, []))
 
         if has_some_data:
             # Set "done" to true iff the plugin returns False
